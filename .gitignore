@@ -1,0 +1,29 @@
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/install.log
+frontend/dev.log
+*.local
+
+# Env
+.env
+.env.local
+frontend/.env
+frontend/.env.local
+
+# Python / backend / mock server
+__pycache__/
+*.pyc
+.venv/
+mock_server/.venv/
+mock_server/server.log
+backend/.venv/
+backend/server.log
+# Downloaded gated personality-engine module + model weights
+backend/.engine_cache/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

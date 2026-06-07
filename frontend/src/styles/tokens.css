@@ -1,0 +1,24 @@
+/*
+ * Design tokens - single source of truth shared between Tailwind (compile-time)
+ * and runtime consumers that cannot read Tailwind classes (D3 selections,
+ * Plotly layout objects). Keep in sync with tailwind.config.ts.
+ */
+:root {
+  --color-bg: #0a0e1a;
+  --color-panel: #0f1923;
+  --color-panel-raised: #13212e;
+  --color-teal: #00b4d8;
+  --color-orange: #f5a623;
+  --color-positive: #00e676;
+  --color-alert: #ff4c4c;
+  --color-data: #e8ecf0;
+  --color-muted: #546e7a;
+  --color-grid: #1b2a38;
+
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Archivo", system-ui, sans-serif;
+
+  --panel-radius: 4px;
+  --panel-border: 1px solid rgba(84, 110, 122, 0.22);
+  --hairline: rgba(84, 110, 122, 0.18);
+}

@@ -1,0 +1,175 @@
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+@import "@fontsource/archivo/600.css";
+@import "@fontsource/archivo/700.css";
+@import "@fontsource/archivo/800.css";
+@import "./tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-data);
+    font-family: var(--font-mono);
+    font-feature-settings: "tnum" 1, "zero" 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  /* Thin terminal scrollbars */
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgba(84, 110, 122, 0.35);
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgba(84, 110, 122, 0.6);
+  }
+
+  ::selection {
+    background: rgba(0, 180, 216, 0.3);
+    color: #fff;
+  }
+}
+
+@layer components {
+  /* Atmospheric overlays: faint grain + a slow CRT scanline sweep.
+     Pointer-events disabled so they never intercept interaction. */
+  .fx-grain::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .fx-scan::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      transparent,
+      rgba(0, 180, 216, 0.04) 50%,
+      transparent
+    );
+    height: 40%;
+    animation: scan 7s linear infinite;
+  }
+
+  .panel-label {
+    @apply font-display font-bold uppercase tracking-[0.18em] text-[0.6rem] text-muted;
+  }
+
+  .stat-value {
+    @apply font-mono tabular-nums text-data;
+  }
+
+  .hairline {
+    border-color: var(--hairline);
+  }
+
+  /* Dashboard mosaic. Mobile/narrow: single-column scrollable stack. lg+:
+     asymmetric grid where the DAG and report anchor the corners and the
+     analytics fill the middle. The named grid-areas are scoped to lg so the
+     narrow fallback does not collapse every panel onto one cell. */
+  .panel-grid {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: 1fr;
+    grid-auto-rows: minmax(300px, auto);
+    overflow-y: auto;
+  }
+
+  @media (min-width: 1024px) {
+    .panel-grid {
+      height: 100%;
+      overflow: hidden;
+      grid-template-columns: repeat(6, 1fr);
+      grid-template-rows: 1.15fr 1fr 1fr;
+      grid-auto-rows: auto;
+      grid-template-areas:
+        "dag dag forecast forecast forecast report"
+        "dag dag ocean scatter heatmap report"
+        "evidence evidence causal causal causal report";
+    }
+
+    .area-dag {
+      grid-area: dag;
+    }
+    .area-forecast {
+      grid-area: forecast;
+    }
+    .area-ocean {
+      grid-area: ocean;
+    }
+    .area-scatter {
+      grid-area: scatter;
+    }
+    .area-heatmap {
+      grid-area: heatmap;
+    }
+    .area-evidence {
+      grid-area: evidence;
+    }
+    .area-causal {
+      grid-area: causal;
+    }
+    .area-report {
+      grid-area: report;
+    }
+  }
+
+  /* Pulsing core for an actively-running DAG node. */
+  .dag-node.is-running .status-core {
+    animation: dag-pulse 1.3s ease-in-out infinite;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+}
+
+@keyframes dag-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.6);
+    opacity: 0.5;
+  }
+}
+
+/* Plotly modebar restyle to match the terminal aesthetic */
+.js-plotly-plot .modebar {
+  background: transparent !important;
+}
+.js-plotly-plot .modebar-btn path {
+  fill: #546e7a !important;
+}
+.js-plotly-plot .modebar-btn.active path,
+.js-plotly-plot .modebar-btn:hover path {
+  fill: #00b4d8 !important;
+}

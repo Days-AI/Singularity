@@ -1,0 +1,9 @@
+# Best-effort extras. These may fail to install on Python 3.14 / Windows; the
+# backend runs fully without them (dependency-safe equivalents are built in).
+
+# Probabilistic forecasting with native prediction intervals.
+chronos-forecasting>=1.4
+
+# Full CrewAI Flow framework. The backend ships a lightweight async orchestrator
+# that mirrors @start/@listen, so this is purely optional.
+crewai>=0.80

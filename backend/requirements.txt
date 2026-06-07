@@ -1,0 +1,31 @@
+# --- Core web / async ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+tenacity>=8.3
+
+# --- Scientific stack (dependency-safe on py3.14 by 2026) ---
+numpy>=1.26
+pandas>=2.2
+scipy>=1.11
+statsmodels>=0.14
+scikit-learn>=1.4
+
+# --- Personality engine (Days234) ---
+huggingface-hub>=0.24
+transformers>=4.40
+# torch is expected to be present (CPU build already installed system-wide).
+# If your venv lacks it, install the CPU wheel:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# --- Evidence agents ---
+ddgs>=6.0
+yfinance>=0.2
+pytrends>=4.9
+wikipedia>=1.4
+
+# --- Persistence (optional at runtime) ---
+supabase>=2.5
