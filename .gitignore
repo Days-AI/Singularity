@@ -11,14 +11,15 @@ frontend/dev.log
 frontend/.env
 frontend/.env.local
 
-# Python / backend / mock server
+# Python / backend
 __pycache__/
 *.pyc
 .venv/
-mock_server/.venv/
-mock_server/server.log
 backend/.venv/
 backend/server.log
+logs/*.jsonl
+# Master log test artifacts
+backend/tests/_master_log_tmp/
 # Downloaded gated personality-engine module + model weights
 backend/.engine_cache/
 

@@ -24,8 +24,29 @@ transformers>=4.40
 # --- Evidence agents ---
 ddgs>=6.0
 yfinance>=0.2
-pytrends>=4.9
 wikipedia>=1.4
+arxiv>=2.1
+# GDELT global news/event search (flag-gated; GDELT_ENABLED). Keyless; reuses
+# pandas above. Import-guarded in tools.sources so the backend still boots if absent.
+gdeltdoc>=1.5
+
+# --- LangChain tool + Graph-RAG layer (flag-gated; LANGCHAIN_ENABLED / RAG_ENABLED) ---
+# Import-guarded everywhere: the backend still boots if these are absent.
+langchain>=0.3
+langchain-core>=0.3
+langchain-community>=0.3
+langchain-huggingface>=0.1
+sentence-transformers>=3.0
+# Native LangChain search providers (flag-gated; LANGCHAIN_NATIVE_TOOLS).
+# DuckDuckGo + Serper wrappers ship in langchain-community above; Parallel
+# search/extract/chat ship in langchain-parallel. Import-guarded in
+# tools.search_providers, so the backend still boots if this is absent.
+langchain-parallel>=0.3
 
 # --- Persistence (optional at runtime) ---
 supabase>=2.5
+
+# NOTE: Report/document generation (PDF, Word, charts) is handled entirely by
+# the in-browser JavaScript stack in the frontend (jsPDF, docx, Plotly, etc.).
+# The Python document-generation deps (reportlab, python-docx, matplotlib,
+# jinja2) were removed; pandas/numpy above remain for data + analytics only.

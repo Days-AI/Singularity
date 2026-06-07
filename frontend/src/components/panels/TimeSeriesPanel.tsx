@@ -72,7 +72,7 @@ export function TimeSeriesPanel() {
   }
 
   return (
-    <div className="relative h-full w-full">
+    <div className="relative h-full min-h-0 w-full p-1">
       <Plot
         data={data}
         useResizeHandler

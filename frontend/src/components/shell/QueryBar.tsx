@@ -3,6 +3,8 @@ interface QueryBarProps {
   onQueryChange: (value: string) => void;
   questions: string[];
   onQuestionsChange: (value: string[]) => void;
+  webSourcesEnabled: boolean;
+  onToggleWebSources: (value: boolean) => void;
   disabled: boolean;
   onRun: () => void;
 }
@@ -17,6 +19,8 @@ export function QueryBar({
   onQueryChange,
   questions,
   onQuestionsChange,
+  webSourcesEnabled,
+  onToggleWebSources,
   disabled,
   onRun,
 }: QueryBarProps) {
@@ -50,9 +54,28 @@ export function QueryBar({
           onKeyDown={(e) => {
             if (e.key === "Enter") submit();
           }}
-          placeholder="Predict Q4 consumer sentiment for EV market in India"
+          placeholder="Analyze market sentiment and behavioral drivers for the next quarter"
           className="min-w-0 flex-1 rounded-sm border border-[color:var(--hairline)] bg-bg px-2.5 py-1 font-mono text-xs text-data outline-none transition-colors focus:border-teal/60 disabled:opacity-50"
         />
+        <button
+          type="button"
+          role="switch"
+          aria-checked={webSourcesEnabled}
+          onClick={() => onToggleWebSources(!webSourcesEnabled)}
+          title="Master switch for all live web sources (Serper, DuckDuckGo, Wikipedia, yFinance). Applies to the next run."
+          className={`flex items-center gap-1.5 rounded-sm border px-2 py-1 font-mono text-2xs uppercase tracking-wider transition-colors ${
+            webSourcesEnabled
+              ? "border-teal/60 bg-teal/10 text-teal"
+              : "border-[color:var(--hairline)] text-muted hover:text-data"
+          }`}
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              webSourcesEnabled ? "bg-teal" : "bg-muted"
+            }`}
+          />
+          Web Sources {webSourcesEnabled ? "On" : "Off"}
+        </button>
         <button
           onClick={addQuestion}
           disabled={disabled}

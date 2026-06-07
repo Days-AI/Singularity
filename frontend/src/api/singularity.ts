@@ -1,14 +1,6 @@
 /**
- * Backend API surface. Today these target the mock FastAPI server; the same
- * URLs map onto the real CrewAI-backed FastAPI service later (spec section 4.2)
- * with no frontend changes required.
+ * Backend API surface. These URLs map onto the FastAPI service (spec section 4.2).
  */
-
-export type StreamMode = "live" | "mock";
-
-export function getStreamMode(): StreamMode {
-  return import.meta.env.VITE_STREAM_MODE === "mock" ? "mock" : "live";
-}
 
 /** SSE stream endpoint for a given flow. Same-origin so Vite can proxy it. */
 export function streamUrl(flowUuid: string): string {
@@ -20,21 +12,52 @@ export interface SubmittedQuery {
   sessionId: string;
 }
 
+export interface OllamaHealth {
+  reachable: boolean;
+  base_url: string;
+  configured_model: string;
+  active_model?: string;
+  model_available: boolean;
+  available_models: string[];
+  error?: string;
+}
+
+export interface BackendHealth {
+  status: string;
+  ollama_model: string;
+  ollama: OllamaHealth;
+  openrouter_polish: boolean;
+}
+
+/** Probe backend + Ollama readiness (GET /api/health). */
+export async function fetchHealth(): Promise<BackendHealth | null> {
+  try {
+    const res = await fetch("/api/health", { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    return (await res.json()) as BackendHealth;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Submit a new simulation query. In live mode this POSTs /api/query and the
- * backend returns a flow_uuid + session_id. The mock server also implements
- * this, but to keep the standalone (no-backend) demo working we synthesize a
- * uuid when the request fails.
+ * Submit a new simulation query. POSTs /api/query and returns flow_uuid +
+ * session_id. Throws if the backend is unreachable.
  */
 export async function submitQuery(
   query: string,
-  questions: string[] = []
+  questions: string[] = [],
+  webSourcesEnabled: boolean = true
 ): Promise<SubmittedQuery> {
   try {
     const res = await fetch("/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, questions }),
+      body: JSON.stringify({
+        query,
+        questions,
+        web_sources_enabled: webSourcesEnabled,
+      }),
     });
     if (res.ok) {
       const json = (await res.json()) as {
@@ -46,11 +69,16 @@ export async function submitQuery(
         sessionId: json.session_id ?? json.flow_uuid,
       };
     }
-  } catch {
-    // fall through to client-side uuid
+    const detail = await res
+      .json()
+      .then((j) => (j as { detail?: string }).detail)
+      .catch(() => undefined);
+    throw new Error(detail ?? `query submit failed (${res.status})`);
+  } catch (err) {
+    throw err instanceof Error
+      ? err
+      : new Error("Backend unreachable — start it with run.bat or uvicorn on :8000");
   }
-  const uuid = crypto.randomUUID();
-  return { flowUuid: uuid, sessionId: uuid };
 }
 
 export interface GeneratedReportSection {

@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
-// The mock (or, later, real) FastAPI backend is expected on :8000.
+// The FastAPI backend is expected on :8000.
 // We proxy /api so the browser EventSource can hit a same-origin URL and
 // avoid CORS during development.
 const BACKEND_URL = process.env.VITE_BACKEND_URL ?? "http://localhost:8000";

@@ -84,7 +84,7 @@ export function SentimentHeatmap() {
   }, [heatmap, size]);
 
   return (
-    <div ref={wrapRef} className="h-full w-full">
+    <div ref={wrapRef} className="h-full min-h-0 w-full p-1">
       {heatmap.length === 0 ? (
         <Empty />
       ) : (

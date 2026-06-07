@@ -1,55 +1,51 @@
-import { Fragment, type ReactNode } from "react";
+import { useState } from "react";
+import { createPortal } from "react-dom";
 import { useSessionStore, type ReportSection } from "@/store/sessionStore";
+import { renderMarkdown } from "@/components/report/markdown";
+import { EnterpriseReport } from "@/components/report/EnterpriseReport";
 
-interface ReportViewerProps {
-  onGenerateReport: () => void;
-  reportLoading: boolean;
-}
-
-/**
- * Live-streaming McKinsey report viewer. Sections arrive via report_section
- * events and render through a minimal, dependency-free markdown subset
- * (headings via section title, **bold**, "- " bullets, and the [VERIFY] flag).
- *
- * Once a run is complete the user can regenerate the report on demand (e.g.
- * after adding focus questions) via the Generate Report action.
- */
-export function ReportViewer({ onGenerateReport, reportLoading }: ReportViewerProps) {
+export function ReportViewer() {
   const sections = useSessionStore((s) => s.reportSections);
   const connection = useSessionStore((s) => s.connection);
+  const [open, setOpen] = useState(false);
 
-  const canGenerate = connection === "complete" && !reportLoading;
+  const canOpen = sections.length > 0;
 
   return (
-    <div className="flex h-full flex-col gap-3">
-      <div className="flex shrink-0 items-center justify-between">
-        <span className="font-mono text-2xs uppercase tracking-widest text-muted">
-          {reportLoading
+    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-1 overflow-hidden p-1">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          {connection === "streaming"
             ? "synthesizing report..."
-            : connection === "complete"
-              ? "run resolved"
-              : "awaiting run completion"}
+            : sections.length
+              ? "report ready"
+              : connection === "complete"
+                ? "run resolved"
+                : "awaiting run completion"}
         </span>
-        <button
-          onClick={onGenerateReport}
-          disabled={!canGenerate}
-          title={
-            connection === "complete"
-              ? "Regenerate the strategic report"
-              : "Available after the simulation completes"
-          }
-          className="rounded-sm border border-teal/50 bg-teal/10 px-2.5 py-1 font-mono text-2xs font-semibold uppercase tracking-wider text-teal transition-colors hover:bg-teal/20 disabled:opacity-40"
-        >
-          {reportLoading ? "Generating..." : "Generate Report"}
-        </button>
+        <div className="panel-no-drag flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            disabled={!canOpen}
+            title={
+              canOpen
+                ? "Open the full enterprise report (charts, frameworks, PDF/Word/PPTX export)"
+                : "Available once report sections are loaded"
+            }
+            className="rounded-sm border border-teal/50 bg-teal/10 px-2.5 py-1 font-mono text-2xs font-semibold uppercase tracking-wider text-teal transition-colors hover:bg-teal/20 disabled:opacity-40"
+          >
+            Open Full Report
+          </button>
+        </div>
       </div>
 
       {!sections.length ? (
-        <div className="flex flex-1 items-center justify-center font-mono text-xs text-muted">
+        <div className="flex min-h-0 items-center justify-center font-mono text-xs text-muted">
           report synthesis pending
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto pr-1">
+        <div className="flex min-h-0 flex-col gap-3 overflow-auto pr-0.5">
           {sections.map((s) => (
             <SectionBlock key={s.index} section={s} />
           ))}
@@ -61,6 +57,8 @@ export function ReportViewer({ onGenerateReport, reportLoading }: ReportViewerPr
           )}
         </div>
       )}
+
+      {open && createPortal(<EnterpriseReport onClose={() => setOpen(false)} />, document.body)}
     </div>
   );
 }
@@ -74,71 +72,4 @@ function SectionBlock({ section }: { section: ReportSection }) {
       <div className="space-y-1.5">{renderMarkdown(section.content)}</div>
     </article>
   );
-}
-
-function renderMarkdown(md: string): ReactNode {
-  const lines = md.split("\n");
-  const blocks: ReactNode[] = [];
-  let bullets: ReactNode[] = [];
-
-  const flush = () => {
-    if (bullets.length) {
-      blocks.push(
-        <ul key={`ul-${blocks.length}`} className="ml-1 space-y-1">
-          {bullets}
-        </ul>
-      );
-      bullets = [];
-    }
-  };
-
-  lines.forEach((raw, i) => {
-    const line = raw.trim();
-    if (!line) {
-      flush();
-      return;
-    }
-    if (line.startsWith("- ")) {
-      bullets.push(
-        <li key={`li-${i}`} className="flex gap-2 font-mono text-xs leading-relaxed text-data">
-          <span className="text-teal">-</span>
-          <span>{renderInline(line.slice(2))}</span>
-        </li>
-      );
-    } else {
-      flush();
-      blocks.push(
-        <p key={`p-${i}`} className="font-mono text-xs leading-relaxed text-data/90">
-          {renderInline(line)}
-        </p>
-      );
-    }
-  });
-  flush();
-  return blocks;
-}
-
-/** Inline: **bold** and [VERIFY] flag highlighting. */
-function renderInline(text: string): ReactNode {
-  const parts = text.split(/(\*\*[^*]+\*\*|\[VERIFY\])/g);
-  return parts.map((part, i) => {
-    if (part === "[VERIFY]") {
-      return (
-        <span
-          key={i}
-          className="mx-0.5 rounded-sm bg-alert/15 px-1 font-semibold text-alert"
-        >
-          [VERIFY]
-        </span>
-      );
-    }
-    if (part.startsWith("**") && part.endsWith("**")) {
-      return (
-        <strong key={i} className="font-semibold text-teal">
-          {part.slice(2, -2)}
-        </strong>
-      );
-    }
-    return <Fragment key={i}>{part}</Fragment>;
-  });
 }

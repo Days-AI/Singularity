@@ -16,14 +16,28 @@ export function useResize<T extends HTMLElement>(): [
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    let raf = 0;
     const ro = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (!entry) return;
       const { width, height } = entry.contentRect;
-      setSize({ width: Math.round(width), height: Math.round(height) });
+      const next = {
+        width: Math.round(width),
+        height: Math.round(height),
+      };
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        setSize((prev) =>
+          prev.width === next.width && prev.height === next.height ? prev : next
+        );
+      });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, []);
 
   return [ref, size];

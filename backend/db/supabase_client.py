@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 from config import get_settings
+from observability.master_log import log_data
 
 logger = logging.getLogger("singularity.store")
 
@@ -44,6 +45,9 @@ class Store:
     def enabled(self) -> bool:
         return self._client is not None
 
+    def _backend_label(self) -> str:
+        return "supabase" if self.enabled else "memory"
+
     async def create_session(self, query: str, flow_uuid: str) -> str:
         session_id = str(uuid.uuid4())
         row = {
@@ -53,6 +57,7 @@ class Store:
             "status": "pending",
         }
         self._mem_sessions[session_id] = row
+        persist_ok = True
         if self._client is not None:
             try:
                 self._client.table("simulation_sessions").insert(
@@ -60,11 +65,19 @@ class Store:
                 ).execute()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("create_session persist failed: %s", exc)
+                persist_ok = False
+        log_data(
+            "create_session",
+            session_id=session_id,
+            flow_uuid=flow_uuid,
+            data={"backend": self._backend_label(), "persist_ok": persist_ok, "status": "pending"},
+        )
         return session_id
 
     async def update_status(self, session_id: str, status: str, dag_json: Any = None) -> None:
         if session_id in self._mem_sessions:
             self._mem_sessions[session_id]["status"] = status
+        persist_ok = True
         if self._client is not None:
             try:
                 patch: dict[str, Any] = {"status": status}
@@ -75,12 +88,20 @@ class Store:
                 ).execute()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("update_status failed: %s", exc)
+                persist_ok = False
+        log_data(
+            "update_status",
+            session_id=session_id,
+            data={"backend": self._backend_label(), "persist_ok": persist_ok, "status": status},
+        )
 
     async def save_report(self, session_id: str, report: dict[str, Any]) -> None:
         self._mem_reports[session_id] = report
+        sections = report.get("sections", [])
+        persist_ok = True
         if self._client is not None:
             try:
-                for section in report.get("sections", []):
+                for section in sections:
                     self._client.table("report_outputs").insert(
                         {
                             "session_id": session_id,
@@ -93,8 +114,19 @@ class Store:
                     ).execute()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("save_report failed: %s", exc)
+                persist_ok = False
+        log_data(
+            "save_report",
+            session_id=session_id,
+            data={
+                "backend": self._backend_label(),
+                "persist_ok": persist_ok,
+                "sections": len(sections) if isinstance(sections, list) else 0,
+            },
+        )
 
     async def save_forecast(self, session_id: str, forecast: dict[str, Any]) -> None:
+        persist_ok = True
         if self._client is not None:
             try:
                 self._client.table("forecast_results").insert(
@@ -108,6 +140,17 @@ class Store:
                 ).execute()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("save_forecast failed: %s", exc)
+                persist_ok = False
+        log_data(
+            "save_forecast",
+            session_id=session_id,
+            data={
+                "backend": self._backend_label(),
+                "persist_ok": persist_ok,
+                "horizon_days": forecast.get("horizon_days"),
+                "model": forecast.get("model"),
+            },
+        )
 
     async def get_report(self, session_id: str) -> dict[str, Any] | None:
         if session_id in self._mem_reports:

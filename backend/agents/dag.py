@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+from config import get_settings
 from llm.ollama_client import get_ollama
 from prompts import DAG_SYSTEM, DAG_USER
 from state import DagCreatedPayload, DagEdge, DagNode
@@ -20,7 +21,10 @@ _VALID_TYPES = {"web_search", "financial", "psychometric", "forecast"}
 
 async def decompose(query: str) -> DagCreatedPayload:
     try:
-        data = await get_ollama().generate_json(DAG_SYSTEM, DAG_USER.format(query=query))
+        data = await get_ollama().generate_json(
+            DAG_SYSTEM, DAG_USER.format(query=query),
+            max_tokens=get_settings().dag_max_tokens,
+        )
         nodes = _coerce_nodes(data.get("base_roots", []))
         if not nodes:
             raise ValueError("model returned no usable base_roots")
@@ -112,14 +116,14 @@ def _edges_from(nodes: list[DagNode]) -> list[DagEdge]:
 
 def _default_nodes() -> list[DagNode]:
     return [
-        DagNode(id="br_001", task="Macroeconomic indicators (GDP, CPI, fuel index)",
-                agent_type="financial", dependencies=[], priority=1),
-        DagNode(id="br_002", task="Adoption behavioral drivers - web + news scrape",
+        DagNode(id="br_001", task="Audience and competitive landscape - web research",
                 agent_type="web_search", dependencies=[], priority=1),
-        DagNode(id="br_003", task="Social sentiment & search velocity",
+        DagNode(id="br_002", task="Brand & message resonance - public discourse and media",
+                agent_type="web_search", dependencies=[], priority=1),
+        DagNode(id="br_003", task="Audience sentiment & public discourse",
                 agent_type="web_search", dependencies=[], priority=1),
         DagNode(id="br_004", task="Psychometric segment responses - 1500 IPIP-300 personas",
                 agent_type="psychometric", dependencies=["br_002", "br_003"], priority=2),
-        DagNode(id="br_005", task="Time-series Q4 projection",
+        DagNode(id="br_005", task="Time-series projection (90-day horizon)",
                 agent_type="forecast", dependencies=["br_001", "br_004"], priority=3),
     ]

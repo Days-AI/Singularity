@@ -45,9 +45,26 @@ class IpipPopulation:
         return self.ocean.shape[0]
 
 
+def default_dataset_path() -> Path | None:
+    """Resolve the bundled 1,500-row IPIP-300 sample when no env path is set."""
+    root = Path(__file__).resolve().parent.parent.parent
+    candidates = [
+        root / "IPIP Dataset" / "IPIP300-SCORES-sample-1500.csv",
+        root / "IPIP Dataset" / "IPIP300-SCORES-sample-1500.CSV",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
 def load(path: str | None) -> IpipPopulation | None:
     if not path:
-        return None
+        auto = default_dataset_path()
+        if auto is None:
+            return None
+        path = str(auto)
+        logger.info("Using bundled IPIP dataset at %s", auto.name)
     p = Path(path)
     if p.is_dir():  # accept a directory: pick the first matching CSV
         candidates = sorted(p.glob("*IPIP*SCORES*.csv")) or sorted(p.glob("*.csv"))

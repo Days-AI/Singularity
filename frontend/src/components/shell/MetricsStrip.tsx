@@ -61,12 +61,6 @@ export function MetricsStrip() {
           </span>
         </div>
       ))}
-      <div className="ml-auto flex items-center gap-2 whitespace-nowrap">
-        <span className="h-1.5 w-1.5 rounded-full bg-teal animate-pulse-stream" />
-        <span className="text-2xs uppercase tracking-widest text-muted">
-          Kerala Startup Mission // LeapX
-        </span>
-      </div>
     </footer>
   );
 }

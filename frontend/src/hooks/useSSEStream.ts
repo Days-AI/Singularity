@@ -1,20 +1,17 @@
 import { useCallback, useEffect, useRef } from "react";
-import { getStreamMode, streamUrl, submitQuery } from "@/api/singularity";
-import { startMockStream, type MockStreamHandle } from "@/mock/mockStream";
+import { streamUrl, submitQuery } from "@/api/singularity";
+import { createBatchedDispatch } from "@/lib/sseDispatch";
+import { logClient, startClientHeartbeat } from "@/lib/masterLog";
 import { SSE_EVENT_TYPES, type SSEvent, type SSEventType } from "@/types/events";
 import { useSessionStore } from "@/store/sessionStore";
 
 export const DEFAULT_QUERY =
-  "Predict Q4 consumer sentiment for EV market in India";
+  "Analyze market sentiment and behavioral drivers for the next quarter";
 
 /**
- * Connects the dashboard to the simulation stream.
- *
- * - In "live" mode it opens an EventSource against /api/stream/{flow_uuid},
- *   subscribing to each named SSE channel. It tracks Last-Event-ID for
- *   resume-after-error semantics (spec section 4.3 error handling).
- * - In "mock" mode it replays the scripted scenario in-browser, requiring no
- *   backend.
+ * Connects the dashboard to the simulation stream via EventSource against
+ * /api/stream/{flow_uuid}, subscribing to each named SSE channel. Tracks
+ * Last-Event-ID for resume-after-error semantics (spec section 4.3).
  *
  * The returned `start` submits a query and begins streaming; `stop` tears down.
  */
@@ -22,23 +19,50 @@ export function useSSEStream() {
   const apply = useSessionStore((s) => s.apply);
   const setConnection = useSessionStore((s) => s.setConnection);
   const reset = useSessionStore((s) => s.reset);
+  const pushToast = useSessionStore((s) => s.pushToast);
 
   const esRef = useRef<EventSource | null>(null);
-  const mockRef = useRef<MockStreamHandle | null>(null);
   const lastEventId = useRef<string | null>(null);
+  const heartbeatStopRef = useRef<(() => void) | null>(null);
+  const flowUuidRef = useRef<string | null>(null);
+
+  const stopHeartbeat = useCallback(() => {
+    heartbeatStopRef.current?.();
+    heartbeatStopRef.current = null;
+  }, []);
 
   const teardown = useCallback(() => {
     esRef.current?.close();
     esRef.current = null;
-    mockRef.current?.stop();
-    mockRef.current = null;
-  }, []);
+    stopHeartbeat();
+  }, [stopHeartbeat]);
 
-  const dispatch = useCallback(
+  const dispatchImmediate = useCallback(
     (event: SSEvent) => {
       apply(event);
     },
     [apply]
+  );
+
+  const batchedRef = useRef(createBatchedDispatch(dispatchImmediate));
+  useEffect(() => {
+    batchedRef.current = createBatchedDispatch(dispatchImmediate);
+  }, [dispatchImmediate]);
+
+  const dispatch = useCallback(
+    (event: SSEvent) => {
+      // Lifecycle events must not wait for the next animation frame.
+      if (
+        event.type === "complete" ||
+        event.type === "error" ||
+        event.type === "dag_created"
+      ) {
+        dispatchImmediate(event);
+        return;
+      }
+      batchedRef.current(event);
+    },
+    [dispatchImmediate]
   );
 
   const connectLive = useCallback(
@@ -50,12 +74,37 @@ export function useSSEStream() {
       const es = new EventSource(url, { withCredentials: false });
       esRef.current = es;
 
-      es.onopen = () => setConnection("streaming");
+      es.onopen = () => {
+        setConnection("streaming");
+        logClient(
+          "stream_connect",
+          { flow_uuid: flowUuid },
+          { sessionId: useSessionStore.getState().sessionId, flowUuid }
+        );
+        stopHeartbeat();
+        heartbeatStopRef.current = startClientHeartbeat(() => {
+          const s = useSessionStore.getState();
+          return {
+            connection: s.connection,
+            sessionId: s.sessionId,
+            personasSimulated: s.personasSimulated,
+            evidenceCount: s.evidence.length,
+            activeAgents: s.activeAgents,
+            durationMs: s.durationMs,
+            startedAt: s.startedAt,
+          };
+        });
+      };
       es.onerror = () => {
         // EventSource auto-reconnects; surface a transient error only if the
         // connection is fully closed.
         if (es.readyState === EventSource.CLOSED) {
           setConnection("error");
+          logClient(
+            "stream_error",
+            { flow_uuid: flowUuid, ready_state: es.readyState },
+            { sessionId: useSessionStore.getState().sessionId, flowUuid }
+          );
         }
       };
 
@@ -82,33 +131,48 @@ export function useSSEStream() {
         teardown();
       });
     },
-    [dispatch, setConnection, teardown]
+    [dispatch, setConnection, stopHeartbeat, teardown]
   );
 
   const start = useCallback(
-    async (query: string = DEFAULT_QUERY, questions: string[] = []) => {
+    async (
+      query: string = DEFAULT_QUERY,
+      questions: string[] = [],
+      webSourcesEnabled: boolean = true
+    ) => {
       teardown();
       reset();
       setConnection("connecting");
+      flowUuidRef.current = null;
       useSessionStore.getState().setSessionMeta({ rootQuery: query });
 
-      if (getStreamMode() === "mock") {
-        mockRef.current = startMockStream(dispatch);
-        setConnection("streaming");
-        return;
-      }
-
       try {
-        const { flowUuid, sessionId } = await submitQuery(query, questions);
+        const { flowUuid, sessionId } = await submitQuery(
+          query,
+          questions,
+          webSourcesEnabled
+        );
+        flowUuidRef.current = flowUuid;
         useSessionStore.getState().setSessionMeta({ sessionId });
+        logClient(
+          "query_submitted",
+          { query, questions_count: questions.length },
+          { sessionId, flowUuid }
+        );
         connectLive(flowUuid);
       } catch (err) {
-        console.error("Failed to start live stream, falling back to mock", err);
-        mockRef.current = startMockStream(dispatch);
-        setConnection("streaming");
+        console.error("Failed to start live stream", err);
+        const msg =
+          err instanceof Error ? err.message : "Backend unreachable on :8000";
+        logClient("stream_start_failed", { message: msg });
+        pushToast({
+          kind: "error",
+          message: `Live backend unavailable (${msg}). Start run.bat or: cd backend && uvicorn main:app --port 8000.`,
+        });
+        setConnection("error");
       }
     },
-    [connectLive, dispatch, reset, setConnection, teardown]
+    [connectLive, pushToast, reset, setConnection, teardown]
   );
 
   const stop = useCallback(() => {

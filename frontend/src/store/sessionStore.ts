@@ -1,19 +1,27 @@
 import { create } from "zustand";
+import { logSseEvent } from "@/lib/masterLog";
 import type {
   AgentResultPayload,
   CausalGraphPayload,
   CompletePayload,
+  ConsensusPayload,
+  CouncilOpinionPayload,
+  CouncilReadyPayload,
   DagCreatedPayload,
   DagNode,
   ErrorPayload,
   EvidenceItem,
+  DeliberationPayload,
   ForecastReadyPayload,
   NodeStatus,
   OceanScores,
   PersonaBatchPayload,
+  PersonaOpinion,
   PersonaPoint,
   HeatmapRow,
   ReportSectionPayload,
+  SocialInteractionTickPayload,
+  SocialSimulationPayload,
   SSEvent,
 } from "@/types/events";
 
@@ -51,36 +59,34 @@ interface SessionState {
   startedAt: number | null;
   durationMs: number | null;
 
-  // DAG
   dagNodes: DagNode[];
   dagEdges: DagCreatedPayload["edges"];
   nodeStatus: Record<string, NodeStatus>;
 
-  // Evidence feed (newest first, capped)
   evidence: EvidenceEntry[];
 
-  // Psychometrics
   oceanMean: OceanScores | null;
-  sentimentDist: { bucket: number; count: number }[];
   personaPoints: PersonaPoint[];
+  personaOpinions: PersonaOpinion[];
   heatmap: HeatmapRow[];
   personasSimulated: number;
   personaTarget: number;
 
-  // Forecast
+  deliberation: DeliberationPayload | null;
+
+  socialTicks: SocialInteractionTickPayload[];
+  socialSimulation: SocialSimulationPayload | null;
+  councilOpinions: CouncilOpinionPayload[];
+  council: CouncilReadyPayload | null;
+  consensus: ConsensusPayload | null;
+
   forecast: ForecastReadyPayload | null;
-
-  // Causal
   causal: CausalGraphPayload | null;
-
-  // Report
   reportSections: ReportSection[];
 
-  // Derived metrics
   activeAgents: number;
   toasts: Toast[];
 
-  // actions
   apply: (event: SSEvent) => void;
   setConnection: (status: ConnectionStatus) => void;
   setSessionMeta: (meta: { sessionId?: string | null; rootQuery?: string }) => void;
@@ -92,7 +98,7 @@ interface SessionState {
 
 const EVIDENCE_CAP = 200;
 const PERSONA_POINT_CAP = 1500;
-
+const PERSONA_OPINION_CAP = 1500;
 const initialState = {
   connection: "idle" as ConnectionStatus,
   sessionId: null,
@@ -104,11 +110,17 @@ const initialState = {
   nodeStatus: {},
   evidence: [],
   oceanMean: null,
-  sentimentDist: [],
   personaPoints: [],
+  personaOpinions: [],
   heatmap: [],
   personasSimulated: 0,
   personaTarget: 1500,
+  deliberation: null,
+  socialTicks: [],
+  socialSimulation: null,
+  councilOpinions: [],
+  council: null,
+  consensus: null,
   forecast: null,
   causal: null,
   reportSections: [],
@@ -156,7 +168,20 @@ export const useSessionStore = create<SessionState>((set) => ({
   dismissToast: (id) =>
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
-  apply: (event) =>
+  apply: (event) => {
+    const sessionId = useSessionStore.getState().sessionId;
+    if (
+      event.type === "persona_batch" ||
+      event.type === "agent_result" ||
+      event.type === "complete" ||
+      event.type === "error"
+    ) {
+      logSseEvent(
+        event.type,
+        event.payload as unknown as Record<string, unknown>,
+        sessionId
+      );
+    }
     set((state) => {
       switch (event.type) {
         case "dag_created":
@@ -167,6 +192,23 @@ export const useSessionStore = create<SessionState>((set) => ({
           return applyAgentResult(state, event.payload);
         case "persona_batch":
           return applyPersonaBatch(state, event.payload);
+        case "deliberation_ready":
+          return { deliberation: event.payload };
+        case "social_interaction_tick":
+          return { socialTicks: [...state.socialTicks, event.payload] };
+        case "social_simulation_ready":
+          return { socialSimulation: event.payload };
+        case "council_opinion":
+          return {
+            councilOpinions: [...state.councilOpinions, event.payload],
+          };
+        case "council_ready":
+          return {
+            council: event.payload,
+            councilOpinions: event.payload.opinions,
+          };
+        case "consensus_ready":
+          return { consensus: event.payload };
         case "forecast_ready":
           return { forecast: event.payload };
         case "causal_graph":
@@ -178,13 +220,12 @@ export const useSessionStore = create<SessionState>((set) => ({
         case "error":
           return applyError(state, event.payload);
         default: {
-          // Exhaustiveness guard: if a new event type is added to SSEvent and
-          // not handled here, TypeScript will flag this assignment.
           const _exhaustive: never = event;
           return _exhaustive;
         }
       }
-    }),
+    });
+  },
 }));
 
 function applyDagCreated(
@@ -236,12 +277,13 @@ function applyPersonaBatch(
 ): Partial<SessionState> {
   return {
     oceanMean: p.ocean_mean,
-    sentimentDist: p.sentiment_dist,
     heatmap: p.heatmap,
     personasSimulated: p.cumulative_profiles,
-    personaPoints: [...state.personaPoints, ...p.points].slice(
+    personaTarget: Math.max(state.personaTarget, p.cumulative_profiles),
+    personaPoints: [...state.personaPoints, ...p.points].slice(0, PERSONA_POINT_CAP),
+    personaOpinions: [...state.personaOpinions, ...(p.opinions ?? [])].slice(
       0,
-      PERSONA_POINT_CAP
+      PERSONA_OPINION_CAP
     ),
   };
 }

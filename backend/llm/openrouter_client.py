@@ -1,6 +1,6 @@
 """OpenRouter polishing-layer client.
 
-Wraps the OpenRouter chat-completions API for the McKinsey-grade prose pass
+Wraps the OpenRouter chat-completions API for the strategic communications prose pass
 (PT-03). If no API key is configured, callers should fall back to local Gemma;
 `enabled` exposes that decision.
 """
@@ -27,12 +27,16 @@ class OpenRouterClient:
 
     @property
     def enabled(self) -> bool:
-        return self.settings.openrouter_enabled
+        return self.settings.openrouter_enabled and self.settings.use_openrouter_polish
+
+    @property
+    def api_available(self) -> bool:
+        return bool(self.settings.openrouter_api_key)
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=8), reraise=True)
     async def chat_json(self, system: str, user: str, *, temperature: float = 0.5) -> dict[str, Any]:
-        if not self.enabled:
-            raise RuntimeError("OpenRouter not configured")
+        if not self.api_available:
+            raise RuntimeError("OpenRouter API key not configured")
 
         headers = {
             "Authorization": f"Bearer {self.settings.openrouter_api_key}",

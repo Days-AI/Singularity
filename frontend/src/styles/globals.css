@@ -26,6 +26,7 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     overflow: hidden;
+    touch-action: manipulation;
   }
 
   /* Thin terminal scrollbars */
@@ -77,6 +78,17 @@
     );
     height: 40%;
     animation: scan 7s linear infinite;
+    will-change: transform;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fx-scan::after {
+      animation: none;
+      opacity: 0;
+    }
+    .animate-panel-in {
+      animation: none !important;
+    }
   }
 
   .panel-label {
@@ -91,74 +103,91 @@
     border-color: var(--hairline);
   }
 
-  /* Dashboard mosaic. Mobile/narrow: single-column scrollable stack. lg+:
-     asymmetric grid where the DAG and report anchor the corners and the
-     analytics fill the middle. The named grid-areas are scoped to lg so the
-     narrow fallback does not collapse every panel onto one cell. */
-  .panel-grid {
-    display: grid;
-    gap: 8px;
-    grid-template-columns: 1fr;
-    grid-auto-rows: minmax(300px, auto);
-    overflow-y: auto;
+  /* Dashboard mosaic. Tiles are draggable (by header), resizable (by edges),
+     and individually expandable to a full-view modal via react-grid-layout.
+     The scroll container holds the absolutely-positioned grid. */
+  .panel-grid-scroll {
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+    contain: layout style;
   }
 
-  @media (min-width: 1024px) {
-    .panel-grid {
-      height: 100%;
-      overflow: hidden;
-      grid-template-columns: repeat(6, 1fr);
-      grid-template-rows: 1.15fr 1fr 1fr;
-      grid-auto-rows: auto;
-      grid-template-areas:
-        "dag dag forecast forecast forecast report"
-        "dag dag ocean scatter heatmap report"
-        "evidence evidence causal causal causal report";
-    }
-
-    .area-dag {
-      grid-area: dag;
-    }
-    .area-forecast {
-      grid-area: forecast;
-    }
-    .area-ocean {
-      grid-area: ocean;
-    }
-    .area-scatter {
-      grid-area: scatter;
-    }
-    .area-heatmap {
-      grid-area: heatmap;
-    }
-    .area-evidence {
-      grid-area: evidence;
-    }
-    .area-causal {
-      grid-area: causal;
-    }
-    .area-report {
-      grid-area: report;
-    }
+  /* react-grid-layout, restyled for the terminal aesthetic. */
+  .panel-grid-scroll .react-grid-item.react-grid-placeholder {
+    background: var(--color-teal) !important;
+    opacity: 0.12;
+    border-radius: var(--panel-radius);
   }
 
-  /* Pulsing core for an actively-running DAG node. */
-  .dag-node.is-running .status-core {
-    animation: dag-pulse 1.3s ease-in-out infinite;
-    transform-box: fill-box;
-    transform-origin: center;
+  .panel-grid-scroll .react-grid-item.react-draggable-dragging,
+  .panel-grid-scroll .react-grid-item.resizing {
+    z-index: 30;
   }
-}
+  .panel-grid-scroll .react-grid-item.resizing {
+    opacity: 0.92;
+  }
 
-@keyframes dag-pulse {
-  0%,
-  100% {
-    transform: scale(1);
+  /* Every tile stretches to its grid cell; inner shell fills the wrapper. */
+  .panel-grid-scroll .react-grid-item {
+    display: flex;
+    flex-direction: column;
+  }
+  .panel-grid-scroll .react-grid-item > .panel-grid-tile {
+    height: 100%;
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+
+  /* Replace the default arrow image with subtle, hover-revealed grips. */
+  .panel-grid-scroll .react-resizable-handle {
+    background: none;
+  }
+  .panel-grid-scroll .react-resizable-handle::after {
+    content: "";
+    position: absolute;
+    border-color: var(--color-muted);
+    border-style: solid;
+    border-width: 0;
+    opacity: 0;
+    transition: opacity 0.15s ease, border-color 0.15s ease;
+  }
+  .panel-grid-scroll .react-grid-item:hover .react-resizable-handle::after {
+    opacity: 0.7;
+  }
+  .panel-grid-scroll .react-resizable-handle:hover::after {
+    border-color: var(--color-teal);
     opacity: 1;
   }
-  50% {
-    transform: scale(1.6);
-    opacity: 0.5;
+  .panel-grid-scroll .react-resizable-handle-se::after {
+    right: 4px;
+    bottom: 4px;
+    width: 7px;
+    height: 7px;
+    border-right-width: 2px;
+    border-bottom-width: 2px;
+  }
+  .panel-grid-scroll .react-resizable-handle-sw::after {
+    left: 4px;
+    bottom: 4px;
+    width: 7px;
+    height: 7px;
+    border-left-width: 2px;
+    border-bottom-width: 2px;
+  }
+  .panel-grid-scroll .react-resizable-handle-s::after {
+    left: 50%;
+    bottom: 3px;
+    width: 22px;
+    transform: translateX(-50%);
+    border-bottom-width: 2px;
+  }
+  .panel-grid-scroll .react-resizable-handle-e::after {
+    top: 50%;
+    right: 3px;
+    height: 22px;
+    transform: translateY(-50%);
+    border-right-width: 2px;
   }
 }
 
