@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import re
 
-from agents.psychometric import (
-    _FACET_REACTIONS,
-    _REGISTER_PREFIX,
-    _persona_comment,
-)
+from nlp.style_engine import persona_comment
 from state import FacetScore, OceanScores
 
 _BANNED_PATTERNS = [
@@ -28,21 +24,6 @@ def _contains_banned(text: str) -> str | None:
         if re.search(pattern, lower):
             return pattern
     return None
-
-
-def test_register_prefixes_avoid_slang():
-    for register, prefixes in _REGISTER_PREFIX.items():
-        for prefix in prefixes:
-            hit = _contains_banned(prefix)
-            assert hit is None, f"register {register!r} prefix {prefix!r} matches {hit}"
-
-
-def test_facet_reactions_avoid_slang():
-    for facet, bands in _FACET_REACTIONS.items():
-        for band, lines in bands.items():
-            for line in lines:
-                hit = _contains_banned(line)
-                assert hit is None, f"facet {facet}/{band} line {line!r} matches {hit}"
 
 
 def test_persona_comment_smoke_no_slang():
@@ -68,7 +49,7 @@ def test_persona_comment_smoke_no_slang():
     for p_idx in range(50):
         ocean = sample_oceans[p_idx % len(sample_oceans)]
         facets = sample_facets[p_idx % len(sample_facets)]
-        comment = _persona_comment(
+        comment = persona_comment(
             p_idx,
             ocean,
             facets,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agents import monte_carlo
+from config import get_settings
 from fixtures import make_state, run_pipeline_metrics
 
 
@@ -10,7 +11,7 @@ def test_monte_carlo_percentile_ordering():
     p = metrics["outcome_percentiles"]
 
     assert p["p5"] <= p["p25"] <= p["p50"] <= p["p75"] <= p["p95"]
-    assert metrics["n_simulations"] == 2000
+    assert metrics["n_simulations"] == get_settings().monte_carlo_simulations
 
 
 def test_monte_carlo_scenario_keys():

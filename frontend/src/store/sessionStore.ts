@@ -13,6 +13,8 @@ import type {
   EvidenceItem,
   DeliberationPayload,
   ForecastReadyPayload,
+  MonteCarloPayload,
+  PredictionMarketPayload,
   NodeStatus,
   OceanScores,
   PersonaBatchPayload,
@@ -55,6 +57,7 @@ export interface Toast {
 interface SessionState {
   connection: ConnectionStatus;
   sessionId: string | null;
+  flowUuid: string | null;
   rootQuery: string;
   startedAt: number | null;
   durationMs: number | null;
@@ -81,6 +84,8 @@ interface SessionState {
   consensus: ConsensusPayload | null;
 
   forecast: ForecastReadyPayload | null;
+  predictionMarket: PredictionMarketPayload | null;
+  monteCarlo: MonteCarloPayload | null;
   causal: CausalGraphPayload | null;
   reportSections: ReportSection[];
 
@@ -89,7 +94,11 @@ interface SessionState {
 
   apply: (event: SSEvent) => void;
   setConnection: (status: ConnectionStatus) => void;
-  setSessionMeta: (meta: { sessionId?: string | null; rootQuery?: string }) => void;
+  setSessionMeta: (meta: {
+    sessionId?: string | null;
+    flowUuid?: string | null;
+    rootQuery?: string;
+  }) => void;
   setReportSections: (sections: ReportSectionPayload[]) => void;
   pushToast: (toast: Omit<Toast, "id">) => void;
   reset: () => void;
@@ -102,6 +111,7 @@ const PERSONA_OPINION_CAP = 1500;
 const initialState = {
   connection: "idle" as ConnectionStatus,
   sessionId: null,
+  flowUuid: null,
   rootQuery: "",
   startedAt: null,
   durationMs: null,
@@ -122,6 +132,8 @@ const initialState = {
   council: null,
   consensus: null,
   forecast: null,
+  predictionMarket: null,
+  monteCarlo: null,
   causal: null,
   reportSections: [],
   activeAgents: 0,
@@ -143,6 +155,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   setSessionMeta: (meta) =>
     set((s) => ({
       sessionId: meta.sessionId !== undefined ? meta.sessionId : s.sessionId,
+      flowUuid: meta.flowUuid !== undefined ? meta.flowUuid : s.flowUuid,
       rootQuery: meta.rootQuery !== undefined ? meta.rootQuery : s.rootQuery,
     })),
 
@@ -211,6 +224,10 @@ export const useSessionStore = create<SessionState>((set) => ({
           return { consensus: event.payload };
         case "forecast_ready":
           return { forecast: event.payload };
+        case "prediction_market_ready":
+          return { predictionMarket: event.payload };
+        case "monte_carlo_ready":
+          return { monteCarlo: event.payload };
         case "causal_graph":
           return { causal: event.payload };
         case "report_section":

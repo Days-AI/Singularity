@@ -6,6 +6,9 @@ defensive JSON extraction since small local models occasionally wrap output.
 
 A process-wide concurrency limit prevents saturating Ollama when the
 psychometric engine fans out dozens of archetype calls in parallel.
+
+When Ollama is unreachable or errors and OpenRouter is configured, generate()
+falls back to a free-model cascade (see OPENROUTER_FALLBACK_MODELS).
 """
 from __future__ import annotations
 
@@ -13,16 +16,20 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from config import get_settings
+from llm.openrouter_client import OpenRouterError, get_openrouter
+from nlp.prompt_budget import fit_prompt_pair
 
 logger = logging.getLogger("singularity.ollama")
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
+JSON_PREFERRED_FALLBACK_MODEL = "openai/gpt-oss-20b:free"
 
 # Bounds in-flight requests so we don't saturate Ollama when the psychometric
 # engine fans out dozens of archetype calls. Built lazily from settings so it
@@ -30,6 +37,9 @@ _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
 _OLLAMA_SEM: asyncio.Semaphore | None = None
 _HTTP: httpx.AsyncClient | None = None
 _MODEL_OK: bool | None = None
+
+_CIRCUIT_FAILURES = 0
+_CIRCUIT_OPEN_UNTIL = 0.0
 
 
 def _semaphore() -> asyncio.Semaphore:
@@ -41,6 +51,49 @@ def _semaphore() -> asyncio.Semaphore:
 
 class OllamaError(RuntimeError):
     pass
+
+
+class OllamaUnreachableError(OllamaError):
+    """Connect/timeout — do not retry locally; trip the circuit and fall back."""
+
+
+def fallback_model_chain(*, json_mode: bool) -> list[str]:
+    """OpenRouter preference list; json_mode puts gpt-oss-20b first for structured output."""
+    models = get_settings().openrouter_fallback_model_list
+    if json_mode and JSON_PREFERRED_FALLBACK_MODEL in models:
+        return [JSON_PREFERRED_FALLBACK_MODEL, *[m for m in models if m != JSON_PREFERRED_FALLBACK_MODEL]]
+    return list(models)
+
+
+def _circuit_open() -> bool:
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
+    if _CIRCUIT_OPEN_UNTIL <= 0:
+        return False
+    if time.monotonic() < _CIRCUIT_OPEN_UNTIL:
+        return True
+    _CIRCUIT_FAILURES = 0
+    _CIRCUIT_OPEN_UNTIL = 0.0
+    return False
+
+
+def _circuit_record_success() -> None:
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
+    _CIRCUIT_FAILURES = 0
+    _CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def _circuit_record_failure() -> None:
+    global _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
+    settings = get_settings()
+    _CIRCUIT_FAILURES += 1
+    threshold = max(1, settings.ollama_circuit_failures)
+    if _CIRCUIT_FAILURES >= threshold:
+        _CIRCUIT_OPEN_UNTIL = time.monotonic() + settings.ollama_circuit_cooldown_s
+        logger.warning(
+            "Ollama circuit open for %.0fs after %d failures; using OpenRouter fallback",
+            settings.ollama_circuit_cooldown_s,
+            _CIRCUIT_FAILURES,
+        )
 
 
 class OllamaClient:
@@ -70,7 +123,16 @@ class OllamaClient:
         global _MODEL_OK
         if _MODEL_OK is True:
             return
-        models = await self.list_models()
+        try:
+            models = await self.list_models()
+        except httpx.ConnectError as exc:
+            raise OllamaUnreachableError(
+                f"Cannot reach Ollama at {self.base_url}. Is `ollama serve` running?"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise OllamaUnreachableError(
+                f"Ollama timed out at {self.base_url}"
+            ) from exc
         if not models:
             raise OllamaError(
                 f"No models found at {self.base_url}. Run: ollama pull {self.model}"
@@ -93,17 +155,71 @@ class OllamaClient:
             f"Run: ollama pull {wanted}"
         )
 
-    @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=1, max=6), reraise=True)
     async def generate(
         self,
         system: str,
         prompt: str,
         *,
         temperature: float = 0.7,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        num_ctx: int | None = None,
+    ) -> str:
+        use_fallback = self.settings.ollama_fallback_enabled
+        if not _circuit_open():
+            try:
+                text = await self._generate_local(
+                    system,
+                    prompt,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    json_mode=json_mode,
+                    max_tokens=max_tokens,
+                    num_ctx=num_ctx,
+                )
+                _circuit_record_success()
+                return text
+            except OllamaError as exc:
+                _circuit_record_failure()
+                if not use_fallback:
+                    raise
+                logger.warning("Ollama failed; falling back to OpenRouter: %s", exc)
+        elif not use_fallback:
+            raise OllamaError("Ollama circuit is open and OpenRouter fallback is disabled")
+        else:
+            logger.info("Ollama circuit open; using OpenRouter fallback")
+
+        return await self._generate_openrouter(
+            system,
+            prompt,
+            temperature=temperature,
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+        )
+
+    @retry(
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(min=1, max=6),
+        retry=retry_if_not_exception_type(OllamaUnreachableError),
+        reraise=True,
+    )
+    async def _generate_local(
+        self,
+        system: str,
+        prompt: str,
+        *,
+        temperature: float = 0.7,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+        num_ctx: int | None = None,
     ) -> str:
         await self.ensure_model()
+        ctx = num_ctx if num_ctx is not None else self.settings.ollama_num_ctx
         payload: dict[str, Any] = {
             "model": self.model,
             "system": system,
@@ -111,13 +227,33 @@ class OllamaClient:
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "num_ctx": self.settings.ollama_num_ctx,
+                "num_ctx": ctx,
             },
         }
+        if top_p is not None:
+            payload["options"]["top_p"] = top_p
+        if repeat_penalty is not None:
+            payload["options"]["repeat_penalty"] = repeat_penalty
         if json_mode:
             payload["format"] = "json"
         if max_tokens:
             payload["options"]["num_predict"] = max_tokens
+
+        predict = max_tokens or 256
+        system, prompt, trimmed = fit_prompt_pair(
+            system,
+            prompt,
+            num_ctx=ctx,
+            num_predict=predict,
+        )
+        payload["system"] = system
+        payload["prompt"] = prompt
+        if trimmed:
+            logger.warning(
+                "Trimmed Ollama prompt to fit num_ctx=%d (num_predict=%d)",
+                ctx,
+                predict,
+            )
 
         async with _semaphore():
             client = await self._client()
@@ -125,8 +261,12 @@ class OllamaClient:
                 resp = await client.post("/api/generate", json=payload)
                 resp.raise_for_status()
             except httpx.ConnectError as exc:
-                raise OllamaError(
+                raise OllamaUnreachableError(
                     f"Cannot reach Ollama at {self.base_url}. Is `ollama serve` running?"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                raise OllamaUnreachableError(
+                    f"Ollama timed out at {self.base_url}"
                 ) from exc
             except httpx.HTTPStatusError as exc:
                 detail = exc.response.text[:300]
@@ -136,13 +276,38 @@ class OllamaClient:
             data = resp.json()
         return (data.get("response") or "").strip()
 
+    async def _generate_openrouter(
+        self,
+        system: str,
+        prompt: str,
+        *,
+        temperature: float,
+        json_mode: bool,
+        max_tokens: int | None,
+    ) -> str:
+        chain = fallback_model_chain(json_mode=json_mode)
+        try:
+            return await get_openrouter().chat(
+                system,
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                models=chain,
+            )
+        except OpenRouterError as exc:
+            raise OllamaError(f"Ollama failed and OpenRouter fallback failed: {exc}") from exc
+
     async def generate_json(
         self,
         system: str,
         prompt: str,
         *,
         temperature: float = 0.4,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
         max_tokens: int | None = None,
+        num_ctx: int | None = None,
     ) -> dict[str, Any]:
         """Generate and parse a JSON object, tolerating minor wrapping.
 
@@ -150,7 +315,14 @@ class OllamaClient:
         generation early instead of letting the model ramble.
         """
         raw = await self.generate(
-            system, prompt, temperature=temperature, json_mode=True, max_tokens=max_tokens
+            system,
+            prompt,
+            temperature=temperature,
+            top_p=top_p,
+            repeat_penalty=repeat_penalty,
+            json_mode=True,
+            max_tokens=max_tokens,
+            num_ctx=num_ctx,
         )
         return _parse_json(raw)
 
@@ -172,6 +344,11 @@ class OllamaClient:
             "active_model": self.model,
             "model_available": False,
             "available_models": [],
+            "fallback": {
+                "enabled": self.settings.ollama_fallback_enabled,
+                "models": self.settings.openrouter_fallback_model_list,
+                "circuit_open": _circuit_open(),
+            },
         }
         if not reachable:
             return out
@@ -208,3 +385,14 @@ def get_ollama() -> OllamaClient:
     if _client is None:
         _client = OllamaClient()
     return _client
+
+
+def reset_ollama_runtime() -> None:
+    """Drop singleton client, HTTP pool, and circuit state (tests)."""
+    global _client, _HTTP, _OLLAMA_SEM, _MODEL_OK, _CIRCUIT_FAILURES, _CIRCUIT_OPEN_UNTIL
+    _client = None
+    _HTTP = None
+    _OLLAMA_SEM = None
+    _MODEL_OK = None
+    _CIRCUIT_FAILURES = 0
+    _CIRCUIT_OPEN_UNTIL = 0.0

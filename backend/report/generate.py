@@ -21,6 +21,7 @@ from agents.causal import compute_outcome_probability
 from config import get_settings
 from llm.ollama_client import get_ollama
 from llm.openrouter_client import get_openrouter
+from nlp.prompt_budget import trim_json_payload
 from prompts import (
     FINDINGS_SYSTEM,
     FINDINGS_USER,
@@ -53,7 +54,8 @@ async def build(state: SingularityState) -> list[ReportSectionPayload]:
     polished = await _crew_findings(state, data)
     if polished is None:
         raw = await _gemma_findings(data)
-        polished = await _polish(raw, data)
+        skip_cloud = bool(state.metrics.get("flow_budget_exceeded"))
+        polished = await _polish(raw, data, skip_cloud=skip_cloud)
     return _to_sections(polished, data)
 
 
@@ -193,18 +195,20 @@ def _structured_data(state: SingularityState) -> dict:
 async def _gemma_findings(data: dict) -> str:
     try:
         return await get_ollama().generate(
-            FINDINGS_SYSTEM, FINDINGS_USER.format(data=json.dumps(data, default=str)),
-            temperature=0.5, max_tokens=700,
+            FINDINGS_SYSTEM,
+            FINDINGS_USER.format(data=trim_json_payload(data)),
+            temperature=0.5,
+            max_tokens=700,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Gemma findings fallback: %s", exc)
         return _template_findings(data)
 
 
-async def _polish(raw: str, data: dict) -> dict:
-    payload = json.dumps(data, default=str)
+async def _polish(raw: str, data: dict, *, skip_cloud: bool = False) -> dict:
+    payload = trim_json_payload(data)
     openrouter = get_openrouter()
-    if openrouter.enabled:
+    if openrouter.enabled and not skip_cloud:
         try:
             return await openrouter.chat_json(
                 POLISH_SYSTEM, POLISH_USER.format(raw=raw, data=payload)

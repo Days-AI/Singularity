@@ -23,6 +23,8 @@ from agents.cognitive.social_influence import (
 )
 from agents.cognitive.types import AgentCognitiveOutput, CognitiveStateVector
 from config import get_settings
+from llm.ollama_client import get_ollama
+from nlp.topic_context import TopicContext
 from state import EvidenceItem, FacetScore, OceanScores, PersonaResponse
 
 _FACET_ORDER: list[str] = [f for facets in personality.FACETS.values() for f in facets]
@@ -78,6 +80,7 @@ async def run_population_cognitive(
     stimulus: str,
     topic: str,
     run_seed: int | None = None,
+    topic_context: TopicContext | None = None,
 ) -> PopulationCognitiveResult:
     settings = get_settings()
     if run_seed is None:
@@ -118,7 +121,7 @@ async def run_population_cognitive(
         state.active_biases = activate_biases(state)
         state.total_entropy = total_entropy(state, evidence_pol)
 
-        facet_weights = facet_activation_weights(query, evidence, facets)
+        facet_weights = facet_activation_weights(query, evidence, facets, topic_context)
         rng = random.Random(state.entropy_seed)
 
         sentiment, confidence, uncertainty, concerns, intent, trace = deliberate(
@@ -157,7 +160,21 @@ async def run_population_cognitive(
     # NLG: programmatic + LLM sample
     sample_size = min(settings.cognitive_llm_sample_size, population)
     llm_indices = select_llm_sample_indices(outputs, visual_clusters, sample_size)
-    await render_population_comments(outputs, llm_indices, stimulus, context, topic, run_seed)
+    if settings.programmatic_nlg_mode != "draft_only":
+        try:
+            ctx = settings.naturalize_ollama_num_ctx or settings.ollama_num_ctx
+            await get_ollama().generate_json(
+                "Reply with JSON: {\"comment\":\"ready\"}",
+                "ping",
+                max_tokens=16,
+                num_ctx=min(ctx, 2048),
+                temperature=0.0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await render_population_comments(
+        outputs, llm_indices, stimulus, context, topic, run_seed, topic_context
+    )
 
     # Sync pop_sent from cognitive sentiment
     for i, out in enumerate(outputs):

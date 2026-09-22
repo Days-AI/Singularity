@@ -82,6 +82,14 @@ def test_render_population_skips_llm_when_empty_sample():
         key_concerns=["cost"],
         action_likelihood=0.4,
     )
-    asyncio.run(render_population_comments([out], set(), "stimulus", "ctx", "topic", 0))
+
+    async def _mock_batch(drafts, **kwargs):
+        return [("I would wait and see how the cost plays out.", "naturalized")] * len(drafts), {}
+
+    with patch(
+        "agents.cognitive.response_renderer.naturalize_drafts_batch",
+        side_effect=_mock_batch,
+    ):
+        asyncio.run(render_population_comments([out], set(), "stimulus", "ctx", "topic", 0))
     assert out.comment
-    assert out.response_source == "programmatic"
+    assert out.response_source == "naturalized"

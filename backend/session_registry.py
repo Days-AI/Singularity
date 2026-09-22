@@ -18,10 +18,28 @@ _MAX_SESSIONS = 20
 _store: "OrderedDict[str, SingularityState]" = OrderedDict()
 
 
+def _keys_for(state: SingularityState) -> list[str]:
+    keys: list[str] = []
+    if state.session_id:
+        keys.append(state.session_id)
+    if state.flow_uuid and state.flow_uuid not in keys:
+        keys.append(state.flow_uuid)
+    return keys
+
+
 def put(session_id: str, state: SingularityState) -> None:
     """Cache a completed run's state, evicting the oldest beyond the cap."""
     _store[session_id] = state
     _store.move_to_end(session_id)
+    while len(_store) > _MAX_SESSIONS:
+        _store.popitem(last=False)
+
+
+def touch(state: SingularityState) -> None:
+    """Refresh in-progress state so REST endpoints can resolve live runs."""
+    for key in _keys_for(state):
+        _store[key] = state
+        _store.move_to_end(key)
     while len(_store) > _MAX_SESSIONS:
         _store.popitem(last=False)
 

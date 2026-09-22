@@ -47,6 +47,21 @@ class PredictionMarketResult:
     probability_distribution: dict[str, Any] = field(default_factory=dict)
 
 
+def _cluster_key(cid: str | int) -> str:
+    """Canonical cluster key — accepts numeric IDs or label strings."""
+    return str(cid)
+
+
+def _lookup_action(cluster_actions: dict, key: str) -> float:
+    for k in (key, str(key)):
+        if k in cluster_actions:
+            return float(cluster_actions[k])
+    try:
+        return float(cluster_actions.get(int(key), 0.5))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def run(state: SingularityState) -> PredictionMarketResult:
     deliberation = state.metrics.get("deliberation", {})
     cluster_sents = deliberation.get("cluster_sentiments", {})
@@ -70,16 +85,13 @@ def run(state: SingularityState) -> PredictionMarketResult:
         cluster_weights: list[float] = []
 
         for cid, sent in cluster_sents.items():
-            cid_int = int(cid)
-            act = float(
-                cluster_actions.get(str(cid_int),
-                cluster_actions.get(cid_int, 0.5))
-            )
+            key = _cluster_key(cid)
+            act = _lookup_action(cluster_actions, key)
             sent_100 = (float(sent) + 1.0) * 50.0
             act_100 = float(act) * 100.0
             score = w_sent * sent_100 + w_act * act_100
             cluster_scores.append(float(np.clip(score, 0, 100)))
-            size = sizes.get(cid_int, sizes.get(str(cid_int), 1))
+            size = sizes.get(key, sizes.get(cid, 1))
             cluster_weights.append(max(1, int(size)) * max(0.3, confidence))
 
         expected = float(np.average(cluster_scores, weights=cluster_weights))
@@ -118,33 +130,38 @@ def to_metrics(result: PredictionMarketResult) -> dict[str, Any]:
 
 
 def _from_opinions(state: SingularityState) -> tuple[dict, dict, dict]:
-    cluster_sents: dict[int, float] = {}
-    cluster_actions: dict[int, float] = {}
-    sizes: dict[int, int] = {}
+    """Aggregate opinions by cluster_label (fallback: numeric cluster id)."""
+    cluster_sents: dict[str, list[float]] = {}
+    cluster_actions: dict[str, list[float]] = {}
+    sizes: dict[str, int] = {}
     for o in state.persona_opinions:
-        c = o.cluster
-        if c not in cluster_sents:
-            cluster_sents[c] = []
-            cluster_actions[c] = []  # type: ignore[assignment]
-            sizes[c] = 0
-        cluster_sents[c].append(o.sentiment)  # type: ignore[attr-defined]
-        cluster_actions[c].append(o.action_likelihood)  # type: ignore[attr-defined]
-        sizes[c] += 1
+        key = o.cluster_label or str(o.cluster)
+        cluster_sents.setdefault(key, []).append(o.sentiment)
+        cluster_actions.setdefault(key, []).append(o.action_likelihood)
+        sizes[key] = sizes.get(key, 0) + 1
     return (
-        {k: float(np.mean(v)) for k, v in cluster_sents.items()},  # type: ignore[type-var]
-        {k: float(np.mean(v)) for k, v in cluster_actions.items()},  # type: ignore[type-var]
+        {k: float(np.mean(v)) for k, v in cluster_sents.items()},
+        {k: float(np.mean(v)) for k, v in cluster_actions.items()},
         sizes,
     )
 
 
-def _infer_sizes(state: SingularityState, cluster_sents: dict) -> dict:
+def _infer_sizes(state: SingularityState, cluster_sents: dict) -> dict[str, int]:
     if state.persona_opinions:
-        sizes: dict[int, int] = {}
+        sizes: dict[str, int] = {}
         for o in state.persona_opinions:
-            sizes[o.cluster] = sizes.get(o.cluster, 0) + 1
+            key = o.cluster_label or str(o.cluster)
+            sizes[key] = sizes.get(key, 0) + 1
+        # Map deliberation string keys to opinion counts when labels match
+        for cid in cluster_sents:
+            ck = _cluster_key(cid)
+            if ck not in sizes:
+                sizes[ck] = sum(
+                    1 for o in state.persona_opinions
+                    if o.cluster_label == ck or str(o.cluster) == ck
+                ) or 1
         return sizes
-    n = max(len(cluster_sents), 1)
-    return {int(k): 1 for k in cluster_sents}
+    return {_cluster_key(k): 1 for k in cluster_sents}
 
 
 def _fallback_market(state: SingularityState) -> PredictionMarketResult:

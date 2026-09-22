@@ -160,9 +160,14 @@ function PopulationFeed({
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono text-2xs text-muted">{op.id}</span>
                     <div className="flex items-center gap-1">
-                      {op.response_source === "llm" && (
+                      {op.voice_register && (
+                        <span className="rounded-sm border border-orange/40 px-1 font-mono text-2xs text-orange">
+                          {op.voice_register}
+                        </span>
+                      )}
+                      {(op.response_source === "llm" || op.response_source === "llm_polished") && (
                         <span className="rounded-sm border border-teal/40 px-1 font-mono text-2xs text-teal">
-                          LLM
+                          {op.response_source === "llm_polished" ? "polished" : "LLM"}
                         </span>
                       )}
                       <span
@@ -189,7 +194,7 @@ function PopulationFeed({
                   {expanded === op.id && (
                     <div className="mt-1.5 space-y-1 border-t border-[color:var(--hairline)] pt-1.5">
                       <p className="font-mono text-2xs text-muted">
-                        {op.emotional_state} · sentiment {op.sentiment >= 0 ? "+" : ""}
+                        {op.detected_emotion ?? op.emotional_state} · sentiment {op.sentiment >= 0 ? "+" : ""}
                         {op.sentiment.toFixed(2)} · action {(op.action_likelihood * 100).toFixed(0)}%
                         {op.stance_confidence != null && (
                           <> · confidence {(op.stance_confidence * 100).toFixed(0)}%</>

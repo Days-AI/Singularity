@@ -107,12 +107,15 @@ class AgentCognitiveOutput:
     action_likelihood: float
     comment: str = ""
     response_source: str = "programmatic"
+    voice_register: str | None = None
+    detected_emotion: str | None = None
 
     def to_opinion_fields(self) -> dict[str, Any]:
+        emotional = self.detected_emotion or self.state.emotions.label()
         return {
             "sentiment": self.sentiment,
             "behavioral_intent": self.behavioral_intent,
-            "emotional_state": self.state.emotions.label(),
+            "emotional_state": emotional,
             "key_concerns": self.key_concerns,
             "action_likelihood": self.action_likelihood,
             "comment": self.comment,
@@ -120,5 +123,7 @@ class AgentCognitiveOutput:
             "uncertainty": round(self.state.uncertainty, 3),
             "active_biases": self.state.active_bias_ids(),
             "response_source": self.response_source,
+            "voice_register": self.voice_register,
+            "detected_emotion": self.detected_emotion,
             "facets": dict(self.state.facets),
         }

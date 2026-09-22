@@ -12,9 +12,9 @@ from typing import Any
 
 import numpy as np
 
-from agents._async_util import run_optional_async
 from config import get_settings
 from llm.ollama_client import get_ollama
+from nlp.prompt_budget import trim_json_payload
 from prompts import DECISION_ENGINE_USER, SINGULARITY_ENGINE_SYSTEM
 from state import SingularityState
 
@@ -40,9 +40,17 @@ class DecisionEngineResult:
 
 
 def run(state: SingularityState) -> DecisionEngineResult:
+    """Sync entry for tests/scripts — template options only."""
+    return DecisionEngineResult(options=_build_template_options(state))
+
+
+async def run_async(state: SingularityState) -> DecisionEngineResult:
     template_options = _build_template_options(state)
-    if get_settings().decision_engine_llm_enrich:
-        enriched = run_optional_async(_enrich_with_llm(state, template_options))
+    settings = get_settings()
+    if state.metrics.get("flow_budget_exceeded"):
+        return DecisionEngineResult(options=template_options)
+    if settings.decision_engine_llm_enrich:
+        enriched = await _enrich_with_llm(state, template_options)
         if enriched:
             return enriched
     return DecisionEngineResult(options=template_options)
@@ -207,7 +215,7 @@ async def _enrich_with_llm(
         "monte_carlo": state.metrics.get("monte_carlo"),
         "swarm_optimization": state.metrics.get("swarm_optimization"),
     }
-    user = DECISION_ENGINE_USER.format(data=json.dumps(payload, default=str))
+    user = DECISION_ENGINE_USER.format(data=trim_json_payload(payload))
     try:
         data = await get_ollama().generate_json(
             SINGULARITY_ENGINE_SYSTEM, user, temperature=0.4, max_tokens=900,

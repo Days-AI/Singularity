@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import session_registry
+from causal_intel.router import router as causal_intel_router
 from config import get_settings
 from auth import require_auth
 from db.supabase_client import get_store
@@ -67,16 +68,32 @@ async def lifespan(_app: FastAPI):
     """Warm-check Ollama on startup so misconfig is visible immediately."""
     ollama = get_ollama()
     st = await ollama.status()
+    fallback = st.get("fallback") or {}
+    fallback_models = ", ".join(fallback.get("models") or []) or "(none)"
     if not st["reachable"]:
-        logger.warning(
-            "Ollama unreachable at %s — DAG/persona/report will use fallbacks until it is up.",
-            st["base_url"],
-        )
+        if settings.ollama_fallback_enabled:
+            logger.warning(
+                "Ollama unreachable at %s — DAG/persona/report will use OpenRouter "
+                "free-model fallback: %s",
+                st["base_url"],
+                fallback_models,
+            )
+        else:
+            logger.warning(
+                "Ollama unreachable at %s — DAG/persona/report will use fallbacks until it is up.",
+                st["base_url"],
+            )
     elif not st["model_available"]:
+        extra = (
+            f" OpenRouter fallback armed: {fallback_models}."
+            if settings.ollama_fallback_enabled
+            else ""
+        )
         logger.warning(
-            "Ollama is up but model '%s' is missing. Available: %s",
+            "Ollama is up but model '%s' is missing. Available: %s.%s",
             st["configured_model"],
             ", ".join(st["available_models"][:5]) or "(none)",
+            extra,
         )
     if settings.cognitive_agents_enabled and settings.persona_archetypes > 64:
         logger.warning(
@@ -85,6 +102,13 @@ async def lifespan(_app: FastAPI):
             "significant latency. Recommended: 36.",
             settings.persona_archetypes,
         )
+    logger.info(
+        "Latency mode=%s (budget=%ds, cognitive_llm_sample=%d, ollama_concurrency=%d)",
+        settings.latency_mode_normalized,
+        settings.flow_budget_seconds,
+        settings.cognitive_llm_sample_size,
+        settings.ollama_concurrency,
+    )
     if settings.cognitive_llm_concurrency > settings.ollama_concurrency:
         logger.warning(
             "COGNITIVE_LLM_CONCURRENCY (%d) exceeds OLLAMA_CONCURRENCY (%d); "
@@ -98,6 +122,21 @@ async def lifespan(_app: FastAPI):
             logger.info("Ollama ready: model=%s", ollama.model)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Ollama model check failed: %s", exc)
+
+    async def _prewarm_models() -> None:
+        try:
+            if settings.nlp_pipeline_enabled:
+                from nlp.topic_context import _load_keybert
+
+                await asyncio.to_thread(_load_keybert)
+            if settings.rag_enabled:
+                from rag.embeddings import embeddings_available
+
+                await asyncio.to_thread(embeddings_available)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("NLP/RAG prewarm skipped: %s", exc)
+
+    asyncio.create_task(_prewarm_models())
     yield
 
 
@@ -110,6 +149,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(causal_intel_router, prefix="/api/causal-intel", tags=["causal-intel"])
 
 # In-memory registry: flow_uuid -> pending query context. Supabase (if enabled)
 # is the durable store; this keeps the live handshake working regardless.
@@ -147,7 +188,12 @@ async def health() -> dict:
         "supabase": settings.supabase_enabled,
         "openrouter": settings.openrouter_enabled,
         "openrouter_polish": settings.use_openrouter_polish,
+        "ollama_fallback": ollama_st.get("fallback"),
         "personality_engine": not settings.disable_personality_engine,
+        "features": {
+            "causal_intel": True,
+            "nlp_pipeline": settings.nlp_pipeline_enabled,
+        },
     }
 
 

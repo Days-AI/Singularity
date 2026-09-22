@@ -99,7 +99,9 @@ export interface PersonaOpinion {
   stance_confidence?: number;
   uncertainty?: number;
   active_biases?: string[];
-  response_source?: "programmatic" | "llm";
+  response_source?: "programmatic" | "llm" | "llm_polished";
+  voice_register?: string;
+  detected_emotion?: string;
 }
 
 /** event: deliberation_ready */
@@ -119,6 +121,8 @@ export interface DeliberationPayload {
   persona_archetypes: string[];
   entropy_mean: number;
   social_contagion_index: number;
+  mean_sentiment: number;
+  mean_action_likelihood: number;
 }
 
 /** event: social_interaction_tick */
@@ -235,11 +239,25 @@ export interface ForecastPoint {
   value: number;
 }
 
+/** event: prediction_market_ready */
+export interface PredictionMarketPayload {
+  overall_outcome: number;
+  confidence_interval: number[];
+}
+
+/** event: monte_carlo_ready */
+export interface MonteCarloPayload {
+  p50: number;
+  p5: number;
+  p95: number;
+}
+
 /** event: causal_graph */
 export interface CausalGraphPayload {
   root_goal: string;
   root_description: string;
   overall_prediction: number;
+  outcome_breakdown?: Record<string, number>;
   nodes: CausalNode[];
   edges: CausalEdge[];
 }
@@ -298,6 +316,8 @@ export type SSEvent =
   | { type: "council_ready"; payload: CouncilReadyPayload }
   | { type: "consensus_ready"; payload: ConsensusPayload }
   | { type: "forecast_ready"; payload: ForecastReadyPayload }
+  | { type: "prediction_market_ready"; payload: PredictionMarketPayload }
+  | { type: "monte_carlo_ready"; payload: MonteCarloPayload }
   | { type: "causal_graph"; payload: CausalGraphPayload }
   | { type: "report_section"; payload: ReportSectionPayload }
   | { type: "complete"; payload: CompletePayload }
@@ -318,6 +338,8 @@ export const SSE_EVENT_TYPES: SSEventType[] = [
   "council_ready",
   "consensus_ready",
   "forecast_ready",
+  "prediction_market_ready",
+  "monte_carlo_ready",
   "causal_graph",
   "report_section",
   "complete",

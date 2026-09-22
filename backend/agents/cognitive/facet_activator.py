@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from agents import personality
 from state import EvidenceItem
+
+if TYPE_CHECKING:
+    from nlp.topic_context import TopicContext
 
 _FACET_ORDER: list[str] = [f for facets in personality.FACETS.values() for f in facets]
 
@@ -25,11 +29,15 @@ def facet_activation_weights(
     query: str,
     evidence: list[EvidenceItem],
     facets: dict[str, float],
+    topic_context: TopicContext | None = None,
 ) -> dict[str, float]:
     """Return per-facet relevance multipliers (0.5..1.5) for deliberation weighting."""
     text = query.lower()
     for item in evidence[:5]:
         text += " " + (item.title or "").lower() + " " + (item.detail or "").lower()
+    if topic_context:
+        text += " " + " ".join(topic_context.keyphrases).lower()
+        text += " " + " ".join(topic_context.entities).lower()
 
     weights = {name: 1.0 for name in _FACET_ORDER}
     for pattern, facet_names in _STIMULUS_FACET_HINTS.items():

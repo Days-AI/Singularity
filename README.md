@@ -49,7 +49,8 @@ is [backend/state.py](backend/state.py).
 Every phase is wrapped so a failure emits an `error` event and the run still
 reaches `complete`. The LLM, personality engine, evidence sources, and Supabase
 all degrade gracefully: no HF token → analytic OCEAN fallback; no OpenRouter →
-local Gemma prose; no Supabase service key → in-memory store; a delisted ticker
+local Gemma prose; Ollama down + OpenRouter key → free-model cascade; no
+Supabase service key → in-memory store; a delisted ticker
 → deterministic synthetic series. A run always completes and populates the UI.
 
 ---
@@ -63,6 +64,9 @@ local Gemma prose; no Supabase service key → in-memory store; a delisted ticke
   ```bash
   ollama pull gemma4         # or set OLLAMA_MODEL to your tag (e.g. gemma2:4b)
   ```
+  Local Gemma is primary. If Ollama is down and `OPENROUTER_API_KEY` is set,
+  generation falls back to OpenRouter free models (Nemotron 3 Ultra → Gemma 4
+  31B / 26B → gpt-oss-20b). Disable with `OLLAMA_OPENROUTER_FALLBACK=false`.
 - Optional: a Hugging Face token with access to `Days234/personality-engine`,
   an OpenRouter API key, a Serper key, and a Supabase service key. All optional —
   the backend degrades gracefully without them.
@@ -90,9 +94,12 @@ Open http://localhost:3000. A simulation auto-runs on load (default query:
 "Analyze market sentiment and behavioral drivers for the next quarter"); click **Run Sim** to
 replay. Vite proxies `/api` to the backend on `:8000`.
 
-> On CPU-only hardware the 8B Gemma model serializes calls, so a full run takes
-> a few minutes. Tune `PERSONA_ARCHETYPES` in `backend/.env` (the 1,500-agent
-> population is expanded statistically from these LLM-simulated archetypes).
+> **Performance:** Set `SINGULARITY_LATENCY_MODE=balanced` in `backend/.env` for
+> sub-10-minute end-to-end runs (1,500 agents, 150 Gemma deliberation samples,
+> packed naturalize at 6 briefs/call). Raise `OLLAMA_CONCURRENCY` and
+> `COGNITIVE_LLM_CONCURRENCY` (≤ `OLLAMA_CONCURRENCY`) on GPU Ollama until VRAM
+> saturates; verify with `python scripts/run_e2e_timing.py` from `backend/`.
+> On CPU-only hardware the 8B Gemma model serializes calls, so runs take longer.
 
 ---
 

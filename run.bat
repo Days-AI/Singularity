@@ -6,6 +6,8 @@ REM Run from repo root: double-click run.bat or:  run.bat
 
 cd /d "%~dp0"
 set "ROOT=%~dp0"
+set "VENV=%ROOT%.venv"
+set "VENV_PY=%VENV%\Scripts\python.exe"
 
 where python >nul 2>&1
 if errorlevel 1 (
@@ -99,15 +101,23 @@ if not exist "frontend\package.json" (
     exit /b 1
 )
 
+call :ensure_backend_env
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
+
+call :ensure_frontend_deps
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
+
 echo.
 echo  Starting Project Singularity...
 echo    Ollama   - http://localhost:11434  local Gemma / !OLLAMA_MODEL!
-echo    Backend  - http://localhost:8000  API + SSE
+echo    Backend  - http://localhost:8000  API + SSE  ^(.venv^)
 echo    Frontend - http://localhost:3000  dashboard
-echo.
-echo  First time setup:
-echo    cd backend  ^&^&  python -m pip install -r requirements.txt
-echo    cd frontend ^&^&  npm install
 echo.
 
 set "START_BACKEND=1"
@@ -128,7 +138,7 @@ if not errorlevel 1 (
 )
 
 if "!START_BACKEND!"=="1" (
-    start "Singularity Backend" cmd /k cd /d "%ROOT%backend" ^&^& python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    start "Singularity Backend" cmd /k cd /d "%ROOT%backend" ^&^& "%VENV_PY%" -m uvicorn main:app --host 0.0.0.0 --port 8000
 ) else (
     echo [INFO] Backend already running on http://localhost:8000
 )
@@ -144,6 +154,84 @@ echo  Open the dashboard: http://localhost:3000
 echo  To stop servers: close their windows, or run stop.bat
 echo.
 pause
+exit /b 0
+
+:ensure_backend_env
+if not exist "%VENV_PY%" (
+    echo [INFO] Creating Python virtual environment at .venv ...
+    set "VENV_OK=0"
+    where py >nul 2>&1
+    if not errorlevel 1 (
+        py -3.13 -V >nul 2>&1
+        if not errorlevel 1 (
+            py -3.13 -m venv "%VENV%"
+            if not errorlevel 1 set "VENV_OK=1"
+        )
+        if "!VENV_OK!"=="0" (
+            py -3.12 -V >nul 2>&1
+            if not errorlevel 1 (
+                py -3.12 -m venv "%VENV%"
+                if not errorlevel 1 set "VENV_OK=1"
+            )
+        )
+    )
+    if "!VENV_OK!"=="0" (
+        python -m venv "%VENV%"
+        if errorlevel 1 (
+            echo [ERROR] Failed to create .venv
+            exit /b 1
+        )
+    )
+)
+if not exist "%VENV_PY%" (
+    echo [ERROR] .venv python not found at %VENV_PY%
+    exit /b 1
+)
+
+"%VENV_PY%" -c "import uvicorn" >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] Installing backend dependencies - first run may take several minutes...
+    "%VENV_PY%" -m pip install --upgrade pip
+    if errorlevel 1 (
+        echo [ERROR] pip upgrade failed.
+        exit /b 1
+    )
+    "%VENV_PY%" -m pip install -r "%ROOT%backend\requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] pip install -r backend\requirements.txt failed.
+        exit /b 1
+    )
+    echo [OK] Backend dependencies installed.
+) else (
+    echo [OK] Backend dependencies ready ^(.venv^)
+)
+
+"%VENV_PY%" -c "from config import get_settings; s=get_settings(); print(f'  Latency mode: {s.latency_mode_normalized}  Budget: {s.flow_budget_seconds}s  LLM samples: {s.cognitive_llm_sample_size}  Ollama concurrency: {s.ollama_concurrency}')" 2>nul
+echo [INFO] Sub-10-min runs: set SINGULARITY_LATENCY_MODE=balanced and OLLAMA_CONCURRENCY=12 in backend\.env
+
+REM spaCy model for NLP entity extraction (optional but removes runtime warning)
+"%VENV_PY%" -c "import spacy; spacy.load('en_core_web_sm')" >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] Downloading spaCy model en_core_web_sm ...
+    "%VENV_PY%" -m spacy download en_core_web_sm
+)
+exit /b 0
+
+:ensure_frontend_deps
+if exist "%ROOT%frontend\node_modules" (
+    echo [OK] Frontend dependencies ready
+    exit /b 0
+)
+echo [INFO] Installing frontend dependencies ^(npm install^)...
+pushd "%ROOT%frontend"
+call npm install
+set "NPM_ERR=!errorlevel!"
+popd
+if not "!NPM_ERR!"=="0" (
+    echo [ERROR] npm install failed.
+    exit /b 1
+)
+echo [OK] Frontend dependencies installed.
 exit /b 0
 
 :port_in_use

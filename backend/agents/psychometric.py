@@ -27,6 +27,11 @@ from agents.cognitive.state_engine import (
     run_population_cognitive,
 )
 from config import get_settings
+from nlp.cognitive_draft import build_draft_from_persona_fields
+from nlp.naturalize import naturalize_drafts_batch
+from nlp.style_engine import select_voice, topic_keyword
+from nlp.prompt_budget import clamp_text, compact_nlg_context
+from nlp.topic_context import TopicContext
 from observability.master_log import log_entry
 from llm.ollama_client import get_ollama
 from prompts import PERSONA_SYSTEM, PERSONA_USER
@@ -178,6 +183,7 @@ def _programmatic_archetype_responses(
 async def run(
     state: SingularityState,
     emit_batch: Callable[[PersonaBatchPayload], Awaitable[None]],
+    topic_context: TopicContext | None = None,
 ) -> PsychometricResult:
     settings = get_settings()
     n_arch = settings.persona_archetypes
@@ -185,9 +191,19 @@ async def run(
     n_batches = settings.persona_batches
     stimuli = _GENERIC_STIMULI
 
-    context = _context_from(state)
-    stimulus = f"How do you feel about: {state.query}"
-    topic = _topic_keyword(state.query)
+    context = _context_from(state, topic_context)
+    hook = topic_context.evidence_hook() if topic_context else ""
+    compact_stim, compact_ctx = compact_nlg_context(
+        state.query,
+        keyphrases=topic_context.keyphrases if topic_context else None,
+        evidence_hook=hook,
+    )
+    stimulus = f"How do you feel about: {compact_stim}"
+    if not context or context.startswith("Context for"):
+        context = compact_ctx
+    topic = topic_keyword(state.query)
+    if topic_context and topic_context.keyphrases:
+        topic = topic_context.keyphrases[0]
 
     pop = ipip.load(settings.ipip_data_path)
     if pop is not None:
@@ -278,6 +294,7 @@ async def run(
             stimulus=stimulus,
             topic=topic,
             run_seed=run_seed,
+            topic_context=topic_context,
         )
         all_opinions = _opinions_from_cognitive(cog.outputs, pop_ocean, pop_facets)
         deliberation_metrics = aggregate_deliberation_metrics(
@@ -286,8 +303,9 @@ async def run(
             social_contagion_index=cog.social_contagion_index,
             entropy_mean=cog.entropy_mean,
         )
+        deliberation_metrics["llm_sample_count"] = cog.llm_sample_count
     else:
-        all_opinions = _build_opinions_batch(
+        all_opinions = await _build_opinions_batch_naturalized(
             0,
             population,
             responses,
@@ -298,6 +316,9 @@ async def run(
             visual_clusters,
             cluster_labels,
             topic,
+            stimulus,
+            session_id=state.session_id,
+            flow_uuid=state.flow_uuid,
         )
 
     batch_size = math.ceil(population / n_batches)
@@ -398,13 +419,17 @@ def _opinions_from_cognitive(
                 stance_confidence=fields.get("stance_confidence"),
                 uncertainty=fields.get("uncertainty"),
                 active_biases=fields.get("active_biases") or [],
-                response_source=src if src in ("programmatic", "llm") else None,
+                response_source=src if src in (
+                    "programmatic", "llm", "llm_polished", "naturalized", "draft_fallback"
+                ) else None,
+                voice_register=fields.get("voice_register"),
+                detected_emotion=fields.get("detected_emotion"),
             )
         )
     return opinions
 
 
-def _build_opinions_batch(
+async def _build_opinions_batch_naturalized(
     lo: int,
     hi: int,
     responses: list[PersonaResponse],
@@ -415,8 +440,15 @@ def _build_opinions_batch(
     visual_clusters: np.ndarray,
     cluster_labels: dict[int, str],
     topic: str,
+    stimulus: str,
+    *,
+    session_id: str | None = None,
+    flow_uuid: str | None = None,
 ) -> list[PersonaOpinion]:
     opinions: list[PersonaOpinion] = []
+    drafts = []
+    rows: list[dict] = []
+
     for p_idx in range(lo, hi):
         arch_idx = int(archetype_assign[p_idx]) % len(responses)
         arch = responses[arch_idx]
@@ -429,32 +461,74 @@ def _build_opinions_batch(
         vcluster = int(visual_clusters[p_idx])
         label = cluster_labels.get(vcluster, "Pragmatists")
         top_facets = _salient_facets(pop_facets[p_idx])
+        intent = _vary_intent(arch.behavioral_intent, ocean, sentiment)
+        emotion = _vary_emotion(arch.emotional_state, ocean)
+        concerns = _vary_concerns(arch.key_concerns, ocean)
+        action = round(
+            _clampf(
+                arch.action_likelihood
+                + (sentiment - arch.sentiment_score) * 0.25
+                + (50.0 - ocean.N) / 400.0,
+                0.0,
+                1.0,
+            ),
+            3,
+        )
+        voice = select_voice(ocean, p_idx, entropy=0.5).register
+        drafts.append(
+            build_draft_from_persona_fields(
+                agent_id=f"p_{p_idx:04d}",
+                ocean=ocean,
+                sentiment=sentiment,
+                behavioral_intent=intent,
+                emotional_state=emotion,
+                key_concerns=concerns,
+                action_likelihood=action,
+                cluster_label=label,
+                top_facets=top_facets,
+                topic=topic,
+                stimulus=stimulus,
+                voice_register=voice,
+            )
+        )
+        rows.append({
+            "arch": arch,
+            "ocean": ocean,
+            "top_facets": top_facets,
+            "sentiment": sentiment,
+            "label": label,
+            "vcluster": vcluster,
+            "voice": voice,
+            "intent": intent,
+            "emotion": emotion,
+            "concerns": concerns,
+            "action": action,
+        })
+
+    results, _ = await naturalize_drafts_batch(
+        drafts, session_id=session_id, flow_uuid=flow_uuid
+    )
+
+    for p_idx, row, (comment, src) in zip(range(lo, hi), rows, results, strict=True):
+        arch = row["arch"]
         opinions.append(
             PersonaOpinion(
                 id=f"p_{p_idx:04d}",
                 archetype_id=arch.archetype_id,
-                cluster=vcluster,
-                cluster_label=label,
-                ocean=ocean,
-                sentiment=sentiment,
-                behavioral_intent=_vary_intent(arch.behavioral_intent, ocean, sentiment),
-                emotional_state=_vary_emotion(arch.emotional_state, ocean),
-                key_concerns=_vary_concerns(arch.key_concerns, ocean),
-                action_likelihood=round(
-                    _clampf(
-                        arch.action_likelihood
-                        + (sentiment - arch.sentiment_score) * 0.25
-                        + (50.0 - ocean.N) / 400.0,
-                        0.0,
-                        1.0,
-                    ),
-                    3,
-                ),
-                comment=_persona_comment(
-                    p_idx, ocean, top_facets, sentiment, label, topic,
-                    arch.behavioral_intent, arch.emotional_state,
-                ),
-                top_facets=top_facets,
+                cluster=row["vcluster"],
+                cluster_label=row["label"],
+                ocean=row["ocean"],
+                sentiment=row["sentiment"],
+                behavioral_intent=row["intent"],
+                emotional_state=row["emotion"],
+                key_concerns=row["concerns"],
+                action_likelihood=row["action"],
+                comment=comment,
+                top_facets=row["top_facets"],
+                response_source=src if src in (
+                    "naturalized", "llm_polished", "draft_fallback"
+                ) else "naturalized",
+                voice_register=row["voice"],
             )
         )
     return opinions
@@ -489,238 +563,7 @@ def _vary_concerns(base: list[str], ocean: OceanScores) -> list[str]:
     return concerns[:5]
 
 
-# --- first-person comment synthesis -----------------------------------------
-# Per-persona first-person comments are generated programmatically so all
-# 1,500 agents get a unique, OCEAN- and facet-grounded voice without 1,500 LLM
-# calls. Generation is deterministic (seeded by persona index) for reproducible
-# runs and zero repetition across reloads.
-
-_STOPWORDS = {
-    "analyze", "predict", "forecast", "market", "sentiment", "consumer",
-    "quarter", "next", "about", "with", "from", "that", "this", "what", "when",
-    "where", "which", "the", "and", "for", "behavioral", "drivers", "trends",
-}
-
-# Sentiment openers are a rare fallback only - used when a persona is uniformly
-# moderate and no salient facet exists to anchor a reaction.
-_SENTIMENT_OPENERS = {
-    "positive": ["i'm cautiously into this", "leaning positive on it", "this could work for me"],
-    "neutral": ["i'm on the fence", "could go either way", "need to sit with it"],
-    "negative": ["not sold on this", "this feels off", "skeptical here"],
-}
-
-# Voice registers: stylistic wrappers chosen from the full OCEAN profile so two
-# personas with similar salient facets still phrase reactions differently.
-_REGISTER_PREFIX: dict[str, list[str]] = {
-    "analyst": [
-        "looking at it objectively,",
-        "from what i can tell,",
-        "weighing the facts,",
-        "based on what i see,",
-        "",
-    ],
-    "skeptic": [
-        "i'm not fully convinced,",
-        "i have reservations,",
-        "something here gives me pause,",
-        "my instinct is to push back,",
-    ],
-    "hype": [
-        "this genuinely interests me,",
-        "i find this compelling,",
-        "this stands out to me,",
-        "i'm drawn to the possibilities,",
-    ],
-    "pragmatist": [
-        "practically speaking,",
-        "bottom line for me,",
-        "realistically,",
-        "the practical view is,",
-        "",
-    ],
-    "empath": ["personally,", "for me,", "i feel that", "from my standpoint,"],
-    "blunt": ["to be direct,", "plainly,", "without sugarcoating,", "frankly,"],
-    "casual": ["", "to be fair,", "from my perspective,", "in my view,"],
-}
-
-# Per-facet first-person reaction lines for all 30 IPIP facets, by band. Score
-# magnitude buckets and the persona seed pick among the lines so high-85 and
-# high-66 personas of the same facet can still phrase it differently.
-_FACET_REACTIONS: dict[str, dict[str, list[str]]] = {
-    # --- Openness ---
-    "Imagination": {
-        "high": ["my mind's already running with where this could go", "i keep picturing all the ways it plays out", "i can dream up a dozen uses for this"],
-        "low": ["i'll stick to what's actually in front of me", "not one to daydream about it"],
-        "moderate": ["i can see a couple angles here"],
-    },
-    "Artistic": {
-        "high": ["the whole design of it really speaks to me", "aesthetically this just clicks for me"],
-        "low": ["i don't care how polished it looks", "the look of it doesn't move me"],
-        "moderate": ["the presentation's fine i guess"],
-    },
-    "Emotionality": {
-        "high": ["this genuinely tugs at something for me", "i feel this one pretty deeply"],
-        "low": ["i'm keeping my feelings out of it", "it doesn't hit me emotionally"],
-        "moderate": ["a mild reaction overall"],
-    },
-    "Adventurousness": {
-        "high": ["willing to try something different", "i love shaking up the routine for this", "new territory is exactly my thing"],
-        "low": ["i'd rather stick with the safe option", "new territory makes me hesitate"],
-        "moderate": ["open to it within reason"],
-    },
-    "Intellect": {
-        "high": ["i want to see the actual data first", "show me the reasoning and i'm in", "i need the logic to hold up"],
-        "low": ["don't need all the technical detail", "i'll skip the deep analysis"],
-        "moderate": ["a quick rundown would do"],
-    },
-    "Liberalism": {
-        "high": ["i'm all for challenging how it's usually done", "happy to break from how things have always been"],
-        "low": ["i'd keep things the way they've always worked", "no need to upend the norm"],
-        "moderate": ["depends how far it pushes things"],
-    },
-    # --- Conscientiousness ---
-    "Self-Efficacy": {
-        "high": ["confident i can make it work", "i know i'll handle this fine"],
-        "low": ["not sure i could pull it off", "i doubt i'd manage it well"],
-        "moderate": ["i could probably figure it out"],
-    },
-    "Orderliness": {
-        "high": ["need the details lined up before i commit", "i want this organized first", "give me a clean plan and i'm in"],
-        "low": ["i'm fine with the rough edges", "it doesn't need to be tidy for me"],
-        "moderate": ["a loose plan works"],
-    },
-    "Dutifulness": {
-        "high": ["if i say i'm in, i follow through", "i take the commitment seriously"],
-        "low": ["i won't feel bound to stick with it", "i can walk away anytime"],
-        "moderate": ["i'll honor it if it makes sense"],
-    },
-    "Achievement": {
-        "high": ["this could really help me get ahead", "i'm chasing the payoff here", "i want the win this offers"],
-        "low": ["not chasing anything big with this", "i'm not in it to win anything"],
-        "moderate": ["a modest gain would be nice"],
-    },
-    "Self-Discipline": {
-        "high": ["i can stay the course on this", "i won't lose focus partway through"],
-        "low": ["i'd probably lose steam on it", "i struggle to stick with these"],
-        "moderate": ["i'll keep at it for a while"],
-    },
-    "Cautiousness": {
-        "high": ["want to wait and see first", "i'll think this through before acting", "i'm not rushing this decision"],
-        "low": ["happy to just dive in", "i'll decide on the fly"],
-        "moderate": ["i'll look before i leap, but not for long"],
-    },
-    # --- Extraversion ---
-    "Friendliness": {
-        "high": ["i'd happily bring others along", "warming up to it fast"],
-        "low": ["i'll keep this to myself", "not the welcoming type on this"],
-        "moderate": ["friendly enough about it"],
-    },
-    "Gregariousness": {
-        "high": ["i want to talk this over with everyone", "this is better with a crowd weighing in"],
-        "low": ["i'd rather decide solo", "i don't need the group for this"],
-        "moderate": ["a couple opinions would help"],
-    },
-    "Assertiveness": {
-        "high": ["i'll say it straight: here's my take", "i'm taking the lead on this one", "i'll make my position clear"],
-        "low": ["i'll go with whatever the group picks", "i'd rather not push my view"],
-        "moderate": ["i'll share if asked"],
-    },
-    "Activity": {
-        "high": ["i want to get moving on this now", "no time to waste, let's go"],
-        "low": ["no rush from me", "i'll get to it eventually"],
-        "moderate": ["i'll pace myself on it"],
-    },
-    "Excitement": {
-        "high": ["this genuinely excites me", "this lights me up a bit", "i'm energized about it"],
-        "low": ["it doesn't excite me much", "i'm fairly unmoved by it"],
-        "moderate": ["mildly interested"],
-    },
-    "Cheerfulness": {
-        "high": ["feeling good about where this goes", "pretty upbeat on it"],
-        "low": ["not exactly thrilled", "hard to feel cheery about this"],
-        "moderate": ["cautiously okay with it"],
-    },
-    # --- Agreeableness ---
-    "Trust": {
-        "high": ["i trust the people behind it", "i'm inclined to take them at their word"],
-        "low": ["not sure i trust the claims", "i'd verify before believing any of it", "the claims smell off to me"],
-        "moderate": ["i only partly trust it"],
-    },
-    "Morality": {
-        "high": ["it has to sit right ethically for me", "i won't cut corners on this"],
-        "low": ["ethics aren't my main lens here", "i'm not fussed about the principles"],
-        "moderate": ["as long as it's broadly fair"],
-    },
-    "Altruism": {
-        "high": ["i care how this affects others", "i'd want everyone to benefit"],
-        "low": ["i'm focused on what i get out of it", "others' outcomes aren't my concern here"],
-        "moderate": ["i'd weigh the group somewhat"],
-    },
-    "Cooperation": {
-        "high": ["happy to find common ground on it", "i'll work with whatever's agreed"],
-        "low": ["i'll push back if i disagree", "i won't just go along to get along"],
-        "moderate": ["i'll compromise where it counts"],
-    },
-    "Modesty": {
-        "high": ["i'm not going to overstate my take", "i could easily be wrong here"],
-        "low": ["i'm pretty sure my read is the right one", "my call is the one to trust"],
-        "moderate": ["i think i'm mostly right"],
-    },
-    "Sympathy": {
-        "high": ["i feel for whoever this impacts", "i can't ignore who might get hurt"],
-        "low": ["the sob stories won't sway me", "feelings won't change my call"],
-        "moderate": ["i note the human side"],
-    },
-    # --- Neuroticism ---
-    "Anxiety": {
-        "high": ["the what-ifs are eating at me", "i'm stressing about the downside", "honestly this makes me nervous"],
-        "low": ["relatively calm about the risk", "not anxious about it at all"],
-        "moderate": ["a little uneasy but ok"],
-    },
-    "Anger": {
-        "high": ["this kind of irritates me", "i'm a bit fired up about it"],
-        "low": ["nothing about it bothers me", "i'm not worked up either way"],
-        "moderate": ["mildly annoyed at most"],
-    },
-    "Depression": {
-        "high": ["somewhat pessimistic on this", "hard to feel hopeful here"],
-        "low": ["staying upbeat about it", "i don't see a downside spiral"],
-        "moderate": ["cautiously neutral on the outlook"],
-    },
-    "Self-Consciousness": {
-        "high": ["i worry how i'd look choosing this", "what others think weighs on me"],
-        "low": ["i don't care how it looks to anyone", "no self-image hang-ups here"],
-        "moderate": ["a little image-conscious"],
-    },
-    "Immoderation": {
-        "high": ["honestly might just impulse-jump on it", "i can't resist diving in"],
-        "low": ["i can hold off no problem", "easy for me to wait"],
-        "moderate": ["tempted but controlled"],
-    },
-    "Vulnerability": {
-        "high": ["under pressure i might fold on this", "i could get overwhelmed by it"],
-        "low": ["i'd stay steady under pressure", "stress won't shake my call"],
-        "moderate": ["i'd manage the pressure okay"],
-    },
-}
-
-
-def _sentiment_band(sentiment: float) -> str:
-    if sentiment >= 0.15:
-        return "positive"
-    if sentiment <= -0.15:
-        return "negative"
-    return "neutral"
-
-
-def _topic_keyword(query: str) -> str:
-    words = [w.strip(".,?!:;\"'") for w in (query or "").split()]
-    words = [w for w in words if len(w) > 3 and w.lower() not in _STOPWORDS]
-    return " ".join(words[:3]) if words else "this"
-
-
 def _salient_facets(facet_vec: np.ndarray) -> list[FacetScore]:
-    """Top facets by absolute deviation from the neutral midpoint (50)."""
     order = sorted(
         range(len(_FACET_ORDER)),
         key=lambda i: abs(float(facet_vec[i]) - 50.0),
@@ -733,113 +576,13 @@ def _salient_facets(facet_vec: np.ndarray) -> list[FacetScore]:
     return out
 
 
-def _dominant_trait(ocean: OceanScores) -> tuple[str, str]:
-    dims = {"O": ocean.O, "C": ocean.C, "E": ocean.E, "A": ocean.A, "N": ocean.N}
-    dim = max(dims, key=lambda d: abs(dims[d] - 50.0))
-    return dim, ("high" if dims[dim] >= 50.0 else "low")
-
-
-def _voice_register(ocean: OceanScores, p_idx: int) -> str:
-    """Pick a stylistic register from the full OCEAN profile, jittered by index
-    so adjacent personas with similar profiles still differ."""
-    candidates: list[str] = []
-    if ocean.O >= 60 or ocean.C >= 65:
-        candidates.append("analyst")
-    if ocean.N >= 60 or ocean.A <= 40:
-        candidates.append("skeptic")
-    if ocean.E >= 62 and ocean.N <= 52:
-        candidates.append("hype")
-    if ocean.C >= 58:
-        candidates.append("pragmatist")
-    if ocean.A >= 62:
-        candidates.append("empath")
-    if ocean.E >= 58 and ocean.A <= 45:
-        candidates.append("blunt")
-    candidates.append("casual")
-    return random.Random(p_idx * 7 + 13).choice(candidates)
-
-
-def _facet_reaction(facet: FacetScore, p_idx: int, slot: int) -> str:
-    """First-person clause driven by a facet's name + band + score magnitude."""
-    bank = _FACET_REACTIONS.get(facet.name)
-    if not bank:
-        if facet.band == "high":
-            return f"my {facet.name.lower()} really drives my take here"
-        if facet.band == "low":
-            return f"low {facet.name.lower()} means that's not what sways me"
-        return ""
-    lines = bank.get(facet.band) or []
-    if not lines:
-        return ""
-    # Bucket by deviation magnitude so e.g. Anxiety 85 and 66 can diverge.
-    bucket = int(abs(facet.score - 50.0) // 12)
-    seed = p_idx * 31 + slot * 7 + (hash(facet.name) & 0xFFFF) + bucket
-    return random.Random(seed).choice(lines)
-
-
-def _persona_comment(
-    p_idx: int,
-    ocean: OceanScores,
-    top_facets: list[FacetScore],
-    sentiment: float,
-    cluster_label: str,
-    topic: str,
-    arch_intent: str = "",
-    arch_emotion: str = "",
-) -> str:
-    rng = random.Random(p_idx * 101 + 5)
-    register = _voice_register(ocean, p_idx)
-
-    # Facets are the PRIMARY voice driver. Prefer salient (non-moderate) facets,
-    # falling back to whatever top facets exist.
-    salient = [f for f in top_facets if f.band != "moderate"]
-    primary_pool = salient or top_facets
-
-    clauses: list[str] = []
-    if primary_pool:
-        clauses.append(_facet_reaction(primary_pool[0], p_idx, 0))
-    if len(primary_pool) > 1 and rng.random() < 0.7:
-        clauses.append(_facet_reaction(primary_pool[1], p_idx, 1))
-    if len(primary_pool) > 2 and rng.random() < 0.3:
-        clauses.append(_facet_reaction(primary_pool[2], p_idx, 2))
-    clauses = [c for c in clauses if c]
-
-    # Fallback only when a uniformly-moderate persona yielded no facet reaction.
-    if not clauses:
-        clauses = [rng.choice(_SENTIMENT_OPENERS[_sentiment_band(sentiment)])]
-
-    # Weave in Gemma's archetype intent ~50% as one extra clause for texture.
-    intent = (arch_intent or "").strip().rstrip(".")
-    if intent and rng.random() < 0.5:
-        lower = intent.lower()
-        if not lower.startswith(("i ", "i'm", "im ", "my ")):
-            intent = f"i {intent[0].lower()}{intent[1:]}"
-        clauses.append(intent)
-
-    # Topic anchor only sometimes, so it doesn't become a repeated tail.
-    if topic and topic != "this" and rng.random() < 0.4:
-        clauses.append(f"on {topic}")
-
-    body = ", ".join(clauses)
-
-    prefix = rng.choice(_REGISTER_PREFIX.get(register, [""]))
-    if prefix:
-        body = f"{prefix} {body}"
-
-    if arch_emotion and rng.random() < 0.3:
-        body = f"{body} ({arch_emotion})"
-
-    body = body.strip().strip(",").strip()
-    if len(body) > 190:
-        body = body[:187].rstrip() + "..."
-    return body
-
-
-def _context_from(state: SingularityState) -> str:
+def _context_from(state: SingularityState, topic_context: TopicContext | None = None) -> str:
+    if topic_context and topic_context.evidence_snippets:
+        return clamp_text(topic_context.evidence_snippets[0], 140)
     if state.evidence:
-        snippets = "; ".join(e.title for e in state.evidence[:5])
-        return f"Context for '{state.query}': {snippets}"
-    return f"Context for '{state.query}'."
+        snippets = "; ".join(clamp_text(e.title, 80) for e in state.evidence[:3])
+        return clamp_text(f"Context for '{state.query[:80]}': {snippets}", 200)
+    return clamp_text(f"Context for '{state.query[:120]}'.", 140)
 
 
 def _expand_population(

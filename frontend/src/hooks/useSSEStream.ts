@@ -153,7 +153,7 @@ export function useSSEStream() {
           webSourcesEnabled
         );
         flowUuidRef.current = flowUuid;
-        useSessionStore.getState().setSessionMeta({ sessionId });
+        useSessionStore.getState().setSessionMeta({ sessionId, flowUuid });
         logClient(
           "query_submitted",
           { query, questions_count: questions.length },

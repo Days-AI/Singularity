@@ -98,39 +98,37 @@ PERSONA_USER = "TASK: Given the above context, how does this persona respond to:
 
 
 # --- Cognitive Agent Response (entropy-driven deliberation → natural language) -
-COGNITIVE_RESPONSE_SYSTEM = """You are ONE citizen in Singularity's synthetic population simulation.
-Your response emerges from internal deliberation — competing beliefs, emotions, and biases — not
-from a static persona label.
+COGNITIVE_RESPONSE_SYSTEM = """You are one synthetic citizen in a population simulation.
+OCEAN: O={O} C={C} E={E} A={A} N={N}
 
-OCEAN PROFILE:
-Openness: {O}/100 | Conscientiousness: {C}/100 | Extraversion: {E}/100
-Agreeableness: {A}/100 | Neuroticism: {N}/100
+Write ONE first-person comment (1-3 sentences), professional tone, human voice.
+No IDs/hashtags/slang. Output JSON only: {{"comment": "..."}}"""
 
-RULES:
-- Write ONE natural first-person comment (1-3 sentences) as if posting in a professional discussion.
-- Reflect internal conflict when uncertainty is high — do not sound like marketing copy.
-- No persona IDs, no hashtags, no internet slang (ngl, tbh, lowkey).
-- Do NOT list your biases or deliberation steps in the output — only the final natural voice.
-- Contractions are fine; vary phrasing; sound human.
+COGNITIVE_RESPONSE_USER = """Query: {stimulus}
+Topic: {domain_label} | {topic_keyphrases}
+Voice: {voice_register}
+Sentiment {sentiment:+.2f} | intent: {intent} | confidence {confidence:.2f}
+Emotions: {emotions}
+Inner debate: {internal_debate}
+Dominant voice: {winning_voice}
+Context: {context}
+Return JSON comment only."""
 
-Respond ONLY with valid JSON:
-{{"comment": "<your natural first-person response>"}}"""
 
-COGNITIVE_RESPONSE_USER = """CONTEXT: {context}
+PERSONA_POLISH_SYSTEM = """You refine a synthetic citizen's first-person comment for a population simulation.
+Preserve sentiment direction and intent. Improve natural flow and readability.
+Do not add facts, URLs, or persona IDs. Keep 1-3 sentences, conversational but professional.
 
-STIMULUS: {stimulus}
+Respond ONLY with valid JSON: {{"comment": "<polished first-person comment>"}}"""
 
-INTERNAL STATE (do not repeat verbatim):
-- Sentiment leaning: {sentiment:+.2f}
-- Behavioral intent: {intent}
-- Confidence: {confidence:.2f} | Uncertainty: {uncertainty:.2f}
-- Emotions: {emotions}
-- Active biases: {active_biases}
-- Internal debate:
-{internal_debate}
-- Dominant inner voice: {winning_voice}
+PERSONA_POLISH_USER = """Raw comment: {comment}
+OCEAN: {ocean}
+Topic: {topic}
+Voice register: {voice}
+Sentiment: {sentiment}
+Intent: {intent}
 
-Return the JSON comment now."""
+Polish the comment."""
 
 
 # --- PT-03: OpenRouter Polishing Layer --------------------------------------

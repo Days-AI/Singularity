@@ -2,17 +2,14 @@ import { useMemo } from "react";
 import type { Data, Layout } from "plotly.js";
 import Plot from "@/lib/plotly";
 import { OutcomeGaugeSvg } from "@/lib/gauge";
+import {
+  buildPredictionOverviewModel,
+  type PredictionOverviewKpi,
+} from "@/lib/reportAnalytics";
 import { useSessionStore } from "@/store/sessionStore";
 import { basePlotlyLayout, COLORS, PLOTLY_CONFIG } from "@/lib/theme";
 
 type MetricTone = "data" | "teal" | "orange" | "positive";
-
-interface MetricItem {
-  key: string;
-  label: string;
-  value: string;
-  tone?: MetricTone;
-}
 
 const TONE_CLASS: Record<MetricTone, string> = {
   data: "text-data",
@@ -38,7 +35,7 @@ function OutcomeGauge({ value }: { value: number }) {
   );
 }
 
-function MetricCell({ label, value, tone = "data" }: MetricItem) {
+function MetricCell({ label, value, tone = "data" }: PredictionOverviewKpi) {
   const accent = TONE_ACCENT[tone];
   return (
     <div
@@ -55,6 +52,30 @@ function MetricCell({ label, value, tone = "data" }: MetricItem) {
   );
 }
 
+function StreamBreakdown({
+  bars,
+}: {
+  bars: { key: string; label: string; value: number; color: string }[];
+}) {
+  if (!bars.length) return null;
+  return (
+    <div className="flex min-w-0 shrink-0 flex-col gap-0.5">
+      {bars.map((b) => (
+        <div key={b.key} className="flex items-center gap-1 font-mono text-[9px]">
+          <span className="w-[4.5rem] shrink-0 truncate uppercase text-muted">{b.label}</span>
+          <div className="h-1 min-w-0 flex-1 overflow-hidden rounded-sm bg-bg/50">
+            <div
+              className="h-full rounded-sm"
+              style={{ width: `${Math.min(100, b.value)}%`, backgroundColor: b.color }}
+            />
+          </div>
+          <span className="w-7 shrink-0 text-right text-data">{b.value.toFixed(0)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PendingBlock({ label }: { label: string }) {
   return (
     <div className="flex h-full min-h-0 items-center justify-center rounded-sm border border-dashed border-[color:var(--hairline)] bg-bg/10 font-mono text-[10px] text-muted">
@@ -63,55 +84,33 @@ function PendingBlock({ label }: { label: string }) {
   );
 }
 
-/** Composite prediction overview: outcome gauge, KPI grid, forecast sparkline. */
+/** Composite prediction overview: outcome gauge, stream breakdown, KPI grid, forecast sparkline. */
 export function PredictionOverview() {
   const forecast = useSessionStore((s) => s.forecast);
   const causal = useSessionStore((s) => s.causal);
   const deliberation = useSessionStore((s) => s.deliberation);
   const consensus = useSessionStore((s) => s.consensus);
+  const predictionMarket = useSessionStore((s) => s.predictionMarket);
+  const monteCarlo = useSessionStore((s) => s.monteCarlo);
+  const personaOpinions = useSessionStore((s) => s.personaOpinions);
   const rootQuery = useSessionStore((s) => s.rootQuery);
 
-  const overall = causal?.overall_prediction ?? null;
-  const hasGauge = overall !== null;
+  const model = useMemo(
+    () =>
+      buildPredictionOverviewModel({
+        causal,
+        deliberation,
+        consensus,
+        predictionMarket,
+        monteCarlo,
+        personaOpinions,
+      }),
+    [causal, deliberation, consensus, predictionMarket, monteCarlo, personaOpinions]
+  );
+
+  const hasGauge = model.overall !== null;
   const hasSpark = Boolean(forecast);
   const queryLine = rootQuery || causal?.root_goal || null;
-
-  const metrics = useMemo((): MetricItem[] => {
-    const items: MetricItem[] = [];
-    if (consensus) {
-      items.push({
-        key: "consensus",
-        label: "Consensus",
-        value: `${(consensus.agreement_score * 100).toFixed(0)}%`,
-        tone: "teal",
-      });
-    }
-    if (deliberation) {
-      items.push({
-        key: "agreement",
-        label: "Agreement",
-        value: `${(deliberation.agreement_rate * 100).toFixed(0)}%`,
-      });
-      items.push({
-        key: "polarization",
-        label: "Polarize",
-        value: `${(deliberation.polarization_index * 100).toFixed(0)}%`,
-        tone: "orange",
-      });
-      items.push({
-        key: "contagion",
-        label: "Contagion",
-        value: `${(deliberation.social_contagion_index * 100).toFixed(0)}%`,
-      });
-      items.push({
-        key: "entropy",
-        label: "Entropy",
-        value: `${(deliberation.entropy_mean * 100).toFixed(0)}%`,
-        tone: "teal",
-      });
-    }
-    return items.slice(0, 4);
-  }, [consensus, deliberation]);
 
   const { sparkData, sparkLayout } = useMemo(() => {
     if (!forecast) return { sparkData: [] as Data[], sparkLayout: {} as Partial<Layout> };
@@ -165,7 +164,7 @@ export function PredictionOverview() {
     return { sparkData: data, sparkLayout: layout };
   }, [forecast]);
 
-  if (!hasGauge && !hasSpark && metrics.length === 0) {
+  if (!hasGauge && !hasSpark && model.kpis.length === 0) {
     return (
       <div className="flex h-full items-center justify-center font-mono text-xs text-muted">
         awaiting prediction synthesis
@@ -173,12 +172,11 @@ export function PredictionOverview() {
     );
   }
 
-  const metricSlots: (MetricItem | null)[] = [...metrics];
-  while (metricSlots.length < 4) metricSlots.push(null);
+  const metricSlots: (PredictionOverviewKpi | null)[] = [...model.kpis];
+  while (metricSlots.length < 6) metricSlots.push(null);
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_minmax(0,1.1fr)] gap-1 overflow-hidden p-1">
-      {/* Query strip — panel header already shows title */}
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_minmax(0,1.1fr)] gap-1 overflow-hidden p-1">
       <div className="flex min-w-0 shrink-0 items-center justify-between gap-2 font-mono text-[10px]">
         <p
           className="min-w-0 flex-1 truncate uppercase tracking-wider text-muted"
@@ -193,19 +191,27 @@ export function PredictionOverview() {
         )}
       </div>
 
-      {/* KPI row — gauge and 2×2 metrics share equal height */}
+      <StreamBreakdown bars={model.streamBars} />
+
       <div
         className={`grid min-h-0 items-stretch gap-1 ${
-          hasGauge ? "grid-cols-[minmax(5.5rem,40%)_minmax(0,1fr)]" : "grid-cols-1"
+          hasGauge ? "grid-cols-[minmax(5.5rem,38%)_minmax(0,1fr)]" : "grid-cols-1"
         }`}
       >
-        {hasGauge && overall !== null ? (
-          <OutcomeGauge value={overall} />
+        {hasGauge && model.overall !== null ? (
+          <div className="flex min-h-0 flex-col gap-0.5">
+            <OutcomeGauge value={model.overall} />
+            {model.marketCi && (
+              <p className="text-center font-mono text-[9px] text-muted">
+                mkt CI {model.marketCi}
+              </p>
+            )}
+          </div>
         ) : (
           <PendingBlock label="outcome pending" />
         )}
 
-        <div className="grid h-full min-h-0 grid-cols-2 grid-rows-2 gap-0.5 self-stretch">
+        <div className="grid h-full min-h-0 grid-cols-2 grid-rows-3 gap-0.5 self-stretch">
           {metricSlots.map((m, i) =>
             m ? (
               <MetricCell key={m.key} label={m.label} value={m.value} tone={m.tone} />
@@ -216,7 +222,6 @@ export function PredictionOverview() {
         </div>
       </div>
 
-      {/* Trajectory */}
       <div className="flex min-h-0 flex-col overflow-hidden rounded-sm border border-[color:var(--hairline)] bg-bg/15">
         <div className="flex shrink-0 items-center justify-between gap-2 px-1.5 py-0.5 font-mono text-[10px]">
           <span className="uppercase tracking-wider text-muted">Trajectory</span>

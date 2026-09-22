@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from functools import lru_cache
 from typing import Any
 
@@ -280,6 +281,42 @@ def serper_search(query: str) -> dict[str, Any]:
 
 
 # --- Provider 4/5: Parallel search + extract --------------------------------
+def _parallel_search_queries(objective: str, *, max_queries: int = 3) -> list[str]:
+    """Build 1-3 keyword queries (3-6 words) required by ParallelWebSearchTool."""
+    text = " ".join((objective or "").split())
+    if not text:
+        return []
+
+    def _clip(words: list[str]) -> str:
+        return " ".join(words[:6])[:200]
+
+    # Short objectives become a single query.
+    words = text.split()
+    if 3 <= len(words) <= 6 and len(text) <= 200:
+        return [_clip(words)]
+
+    queries: list[str] = []
+    for chunk in re.split(r"[.!?;]\s+", text):
+        chunk_words = chunk.strip().split()
+        if len(chunk_words) < 3:
+            continue
+        query = _clip(chunk_words)
+        if query and query not in queries:
+            queries.append(query)
+        if len(queries) >= max_queries:
+            break
+
+    if not queries:
+        queries = [_clip(words)]
+
+    # API requires at least one query with >=3 words.
+    queries = [q for q in queries if len(q.split()) >= 3]
+    if not queries:
+        padded = words + words[-2:] if len(words) >= 1 else ["web", "search", "query"]
+        queries = [_clip(padded)]
+    return queries[:max_queries]
+
+
 def parallel_search(objective: str, *, max_results: int = 10) -> dict[str, Any]:
     """Run a Parallel web search for a research objective.
 
@@ -299,7 +336,12 @@ def parallel_search(objective: str, *, max_results: int = 10) -> dict[str, Any]:
     if not objective or not objective.strip():
         raise ProviderError("parallel_search requires a non-empty objective.")
     try:
-        payload: dict[str, Any] = {"objective": objective, "max_results": max_results}
+        search_queries = _parallel_search_queries(objective)
+        payload: dict[str, Any] = {
+            "objective": objective,
+            "search_queries": search_queries,
+            "max_results": max_results,
+        }
         result = _parallel_search_tool().invoke(payload)
         logger.info("parallel_search ok (objective=%r)", objective)
         return result if isinstance(result, dict) else {"results": result}

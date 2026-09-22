@@ -112,7 +112,11 @@ class PersonaOpinion(BaseModel):
     stance_confidence: float | None = None
     uncertainty: float | None = None
     active_biases: list[str] = Field(default_factory=list)
-    response_source: Literal["programmatic", "llm"] | None = None
+    response_source: Literal[
+        "programmatic", "llm", "llm_polished", "naturalized", "draft_fallback"
+    ] | None = None
+    voice_register: str | None = None
+    detected_emotion: str | None = None
 
 
 class NarrativeCluster(BaseModel):
@@ -131,6 +135,14 @@ class DeliberationPayload(BaseModel):
     persona_archetypes: list[str] = Field(default_factory=list)
     entropy_mean: float = 0.0
     social_contagion_index: float = 0.0
+    mean_sentiment: float = 0.0
+    mean_action_likelihood: float = 0.0
+
+
+class MonteCarloPayload(BaseModel):
+    p50: float = 50.0
+    p5: float = 40.0
+    p95: float = 60.0
 
 
 # --- Social interaction layer ------------------------------------------------
@@ -230,10 +242,16 @@ class CausalEdge(BaseModel):
     influence: InfluenceLabel = "+"
 
 
+class PredictionMarketPayload(BaseModel):
+    overall_outcome: float
+    confidence_interval: list[float] = Field(default_factory=list)
+
+
 class CausalGraphPayload(BaseModel):
     root_goal: str = ""
     root_description: str = ""
     overall_prediction: float = 0.0
+    outcome_breakdown: dict[str, float] = Field(default_factory=dict)
     nodes: list[CausalNode]
     edges: list[CausalEdge]
 

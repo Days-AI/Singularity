@@ -21,6 +21,11 @@ _CLUSTER_NAMES = ["Skeptics", "Pragmatists", "Enthusiasts"]
 
 def compute_outcome_probability(state: SingularityState) -> float:
     """Canonical headline outcome score (0–100) for dashboard, causal graph, and report."""
+    return compute_outcome_with_breakdown(state)[0]
+
+
+def compute_outcome_with_breakdown(state: SingularityState) -> tuple[float, dict[str, float]]:
+    """Return (headline score, per-stream component scores on 0–100 scale)."""
     return _overall_prediction(state)
 
 
@@ -70,7 +75,7 @@ def build(state: SingularityState) -> CausalGraphPayload:
         )
     )
 
-    overall = compute_outcome_probability(state)
+    overall, breakdown = compute_outcome_with_breakdown(state)
     nodes[-1] = nodes[-1].model_copy(update={"prediction": round(overall, 1)})
 
     # Connect forecast / sentiment mediators to goal
@@ -97,6 +102,7 @@ def build(state: SingularityState) -> CausalGraphPayload:
             "and forecast toward the stated outcome."
         ),
         overall_prediction=round(overall, 1),
+        outcome_breakdown=breakdown,
         nodes=nodes,
         edges=edges,
     )
@@ -168,60 +174,83 @@ _OVERALL_WEIGHTS = {
 }
 
 
-def _overall_prediction(state: SingularityState) -> float:
-    """Precise, deterministic outcome probability in ``[0, 100]``.
+def _agentic_population_signal(state: SingularityState) -> tuple[float | None, float | None]:
+    """Sentiment and adoption on 0–100 from agentic population (opinions/deliberation)."""
+    delib = state.metrics.get("deliberation", {})
 
-    Blends the *independent* simulation signals with fixed weights, renormalized
-    over whichever signals are actually present. This avoids the prior version's
-    imprecision:
+    sent_score: float | None = None
+    adopt_score: float | None = None
 
-    * No double-counting - the previous code added persona sentiment once and
-      then again via the synthetic AR(1) ``Agent Sentiment`` series (the same
-      signal at a different scale plus RNG noise), making the gauge non-
-      deterministic. Only real state signals are used here.
-    * Consistent scaling - sentiment in ``[-1, 1]`` maps linearly to ``[0, 100]``.
-    * Saturating forecast term - the horizon percent-change passes through a
-      ``tanh`` so small moves still register and large ones don't clip the gauge
-      to its bounds (the prior endpoint ``50 + delta`` flattened toward 50).
-    """
-    components: list[tuple[float, float]] = []  # (score_0_100, weight)
+    if delib.get("mean_sentiment") is not None:
+        sent_score = float(np.clip(50 + float(delib["mean_sentiment"]) * 50, 0, 100))
+    elif state.persona_opinions:
+        sent = float(np.mean([o.sentiment for o in state.persona_opinions]))
+        sent_score = float(np.clip(50 + sent * 50, 0, 100))
+
+    if delib.get("mean_action_likelihood") is not None:
+        adopt_score = float(np.clip(float(delib["mean_action_likelihood"]) * 100, 0, 100))
+    elif state.persona_opinions:
+        actions = [o.action_likelihood for o in state.persona_opinions]
+        if actions:
+            adopt_score = float(np.clip(float(np.mean(actions)) * 100, 0, 100))
+
+    return sent_score, adopt_score
+
+
+def _overall_prediction(state: SingularityState) -> tuple[float, dict[str, float]]:
+    """Precise, deterministic outcome probability in ``[0, 100]`` with stream breakdown."""
+    components: list[tuple[str, float, float]] = []  # (name, score_0_100, weight)
+    breakdown: dict[str, float] = {}
 
     market = state.metrics.get("prediction_market", {})
     if market.get("overall_outcome") is not None:
-        components.append(
-            (float(np.clip(float(market["overall_outcome"]), 0, 100)), _OVERALL_WEIGHTS["market"])
-        )
+        m_score = float(np.clip(float(market["overall_outcome"]), 0, 100))
+        components.append(("market", m_score, _OVERALL_WEIGHTS["market"]))
+        breakdown["market"] = round(m_score, 1)
 
-    responses = state.persona_responses
-    if responses:
-        sent = float(np.mean([r.sentiment_score for r in responses]))
-        components.append((float(np.clip(50 + sent * 50, 0, 100)), _OVERALL_WEIGHTS["sentiment"]))
+    agentic_sent, agentic_adopt = _agentic_population_signal(state)
+    if agentic_sent is not None:
+        components.append(("agentic_sentiment", agentic_sent, _OVERALL_WEIGHTS["sentiment"]))
+        breakdown["agentic_sentiment"] = round(agentic_sent, 1)
+    elif state.persona_responses:
+        sent = float(np.mean([r.sentiment_score for r in state.persona_responses]))
+        s_score = float(np.clip(50 + sent * 50, 0, 100))
+        components.append(("agentic_sentiment", s_score, _OVERALL_WEIGHTS["sentiment"]))
+        breakdown["agentic_sentiment"] = round(s_score, 1)
 
-        actions = [r.action_likelihood for r in responses if r.action_likelihood is not None]
+    if agentic_adopt is not None:
+        components.append(("agentic_adoption", agentic_adopt, _OVERALL_WEIGHTS["adoption"]))
+        breakdown["agentic_adoption"] = round(agentic_adopt, 1)
+    elif state.persona_responses:
+        actions = [r.action_likelihood for r in state.persona_responses if r.action_likelihood is not None]
         if actions:
-            components.append(
-                (float(np.clip(float(np.mean(actions)) * 100, 0, 100)), _OVERALL_WEIGHTS["adoption"])
-            )
+            a_score = float(np.clip(float(np.mean(actions)) * 100, 0, 100))
+            components.append(("agentic_adoption", a_score, _OVERALL_WEIGHTS["adoption"]))
+            breakdown["agentic_adoption"] = round(a_score, 1)
 
     if state.forecast and state.forecast.predictions:
         hist = state.forecast.history
         start = hist[-1].value if hist else state.forecast.predictions[0].value
         end = state.forecast.predictions[-1].value
         pct_change = (end - start) / max(abs(start), 1e-9) * 100.0
-        # ~±25% horizon move -> ~±19 points around the 50 midpoint.
-        score = 50.0 + 50.0 * float(np.tanh(pct_change / 25.0))
-        components.append((float(np.clip(score, 0, 100)), _OVERALL_WEIGHTS["forecast"]))
+        f_score = float(np.clip(50.0 + 50.0 * float(np.tanh(pct_change / 25.0)), 0, 100))
+        components.append(("forecast", f_score, _OVERALL_WEIGHTS["forecast"]))
+        breakdown["forecast"] = round(f_score, 1)
 
     evidence_sents = [e.sentiment for e in state.evidence if e.sentiment is not None]
     if evidence_sents:
         ev = float(np.mean(evidence_sents))
-        components.append((float(np.clip(50 + ev * 50, 0, 100)), _OVERALL_WEIGHTS["evidence"]))
+        e_score = float(np.clip(50 + ev * 50, 0, 100))
+        components.append(("evidence", e_score, _OVERALL_WEIGHTS["evidence"]))
+        breakdown["evidence"] = round(e_score, 1)
 
     if not components:
-        return 50.0
-    total_weight = sum(w for _, w in components)
-    blended = sum(score * w for score, w in components) / total_weight
-    return float(np.clip(blended, 0, 100))
+        return 50.0, breakdown
+    total_weight = sum(w for _, _, w in components)
+    blended = sum(score * w for _, score, w in components) / total_weight
+    headline = float(np.clip(blended, 0, 100))
+    breakdown["headline"] = round(headline, 1)
+    return headline, breakdown
 
 
 def _apply_criticality(nodes: list[CausalNode], edges: list[CausalEdge]) -> None:

@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { lazy, memo, Suspense } from "react";
 import { Responsive, WidthProvider } from "react-grid-layout";
 import { DashboardPanel } from "./DashboardPanel";
 import {
@@ -12,7 +12,6 @@ import { OCEANRadar } from "@/components/panels/OCEANRadar";
 import { SentimentHeatmap } from "@/components/panels/SentimentHeatmap";
 import { TimeSeriesPanel } from "@/components/panels/TimeSeriesPanel";
 import { PersonaScatter3D } from "@/components/panels/PersonaScatter3D";
-import { CausalMapD3 } from "@/components/panels/CausalMapD3";
 import { EvidenceFeed } from "@/components/panels/EvidenceFeed";
 import { PersonaOpinionsFeed } from "@/components/panels/PersonaOpinionsFeed";
 import { SourceBreakdownChart } from "@/components/panels/SourceBreakdownChart";
@@ -38,12 +37,13 @@ function PredictionPanel() {
   const hasCausal = useSessionStore((s) => s.causal !== null);
   const hasDeliberation = useSessionStore((s) => s.deliberation !== null);
   const hasConsensus = useSessionStore((s) => s.consensus !== null);
+  const hasMarket = useSessionStore((s) => s.predictionMarket !== null);
   return (
     <DashboardPanel
       label="Prediction Overview"
       code="PRD-00"
       flush
-      hasData={hasForecast || hasCausal || hasDeliberation || hasConsensus}
+      hasData={hasForecast || hasCausal || hasDeliberation || hasConsensus || hasMarket}
     >
       <PredictionOverview />
     </DashboardPanel>
@@ -104,11 +104,25 @@ function SourcesPanel() {
   );
 }
 
+const LazyCausalTile = lazy(() =>
+  import("@/components/causal/CausalIntelligenceTile").then((m) => ({
+    default: m.CausalIntelligenceTile,
+  }))
+);
+
 function CausalPanel() {
   const hasData = useSessionStore((s) => s.causal !== null);
   return (
     <DashboardPanel label="Causal Mapping" code="CSL-09" flush hasData={hasData}>
-      <CausalMapD3 />
+      <Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center font-mono text-xs text-muted">
+            loading causal intelligence…
+          </div>
+        }
+      >
+        <LazyCausalTile />
+      </Suspense>
     </DashboardPanel>
   );
 }

@@ -21,9 +21,11 @@ import type {
   DeliberationPayload,
   ForecastReadyPayload,
   HeatmapRow,
+  MonteCarloPayload,
   OceanScores,
   PersonaOpinion,
   PersonaPoint,
+  PredictionMarketPayload,
   SocialSimulationPayload,
 } from "@/types/events";
 import type { EvidenceEntry, ReportSection } from "@/store/sessionStore";
@@ -630,5 +632,125 @@ export function buildReportModel(input: AnalyticsInput): ReportModel {
     personaPoints: input.personaPoints,
     causal,
     forecast,
+  };
+}
+
+export interface PredictionStreamBar {
+  key: string;
+  label: string;
+  value: number;
+  color: string;
+}
+
+export interface PredictionOverviewKpi {
+  key: string;
+  label: string;
+  value: string;
+  tone?: "data" | "teal" | "orange" | "positive";
+}
+
+export interface PredictionOverviewModel {
+  overall: number | null;
+  streamBars: PredictionStreamBar[];
+  kpis: PredictionOverviewKpi[];
+  marketCi: string | null;
+}
+
+export interface PredictionOverviewInput {
+  causal: CausalGraphPayload | null;
+  deliberation: DeliberationPayload | null;
+  consensus: ConsensusPayload | null;
+  predictionMarket: PredictionMarketPayload | null;
+  monteCarlo: MonteCarloPayload | null;
+  personaOpinions: PersonaOpinion[];
+}
+
+const STREAM_COLORS: Record<string, string> = {
+  agentic_sentiment: "#00b4d8",
+  agentic_adoption: "#48cae4",
+  market: "#7b2cbf",
+  forecast: "#f77f00",
+  evidence: "#6c757d",
+};
+
+/** Shared derivation for live Prediction Overview and executive report gauge context. */
+export function buildPredictionOverviewModel(
+  input: PredictionOverviewInput
+): PredictionOverviewModel {
+  const breakdown = input.causal?.outcome_breakdown ?? {};
+  const streamKeys = ["agentic_sentiment", "agentic_adoption", "market", "forecast", "evidence"] as const;
+  const streamBars: PredictionStreamBar[] = streamKeys
+    .filter((k) => breakdown[k] !== undefined)
+    .map((k) => ({
+      key: k,
+      label: k.replace(/_/g, " "),
+      value: breakdown[k]!,
+      color: STREAM_COLORS[k] ?? "#94a3b8",
+    }));
+
+  let popSentPct: number | null = null;
+  if (input.deliberation?.mean_sentiment !== undefined) {
+    popSentPct = Math.round((50 + input.deliberation.mean_sentiment * 50) * 10) / 10;
+  } else if (input.personaOpinions.length) {
+    const m = mean(input.personaOpinions.map((o) => o.sentiment));
+    popSentPct = Math.round((50 + m * 50) * 10) / 10;
+  }
+
+  const kpis: PredictionOverviewKpi[] = [];
+  if (popSentPct !== null) {
+    kpis.push({ key: "pop_sent", label: "Pop Sent", value: `${popSentPct.toFixed(0)}%`, tone: "teal" });
+  }
+  if (input.predictionMarket) {
+    kpis.push({
+      key: "market",
+      label: "Market",
+      value: `${input.predictionMarket.overall_outcome.toFixed(0)}%`,
+      tone: "data",
+    });
+  }
+  if (input.monteCarlo) {
+    kpis.push({
+      key: "mc_p50",
+      label: "MC p50",
+      value: `${input.monteCarlo.p50.toFixed(0)}%`,
+      tone: "orange",
+    });
+  }
+  if (input.consensus) {
+    kpis.push({
+      key: "council_align",
+      label: "Council",
+      value: `${(input.consensus.council_alignment * 100).toFixed(0)}%`,
+      tone: "positive",
+    });
+  }
+  if (input.deliberation) {
+    kpis.push({
+      key: "agreement",
+      label: "Agreement",
+      value: `${(input.deliberation.agreement_rate * 100).toFixed(0)}%`,
+    });
+    kpis.push({
+      key: "contagion",
+      label: "Contagion",
+      value: `${(input.deliberation.social_contagion_index * 100).toFixed(0)}%`,
+    });
+    kpis.push({
+      key: "entropy",
+      label: "Entropy",
+      value: `${(input.deliberation.entropy_mean * 100).toFixed(0)}%`,
+      tone: "teal",
+    });
+  }
+
+  const ci = input.predictionMarket?.confidence_interval;
+  const marketCi =
+    ci && ci.length >= 2 ? `${ci[0].toFixed(0)}–${ci[1].toFixed(0)}%` : null;
+
+  return {
+    overall: input.causal?.overall_prediction ?? null,
+    streamBars,
+    kpis: kpis.slice(0, 6),
+    marketCi,
   };
 }

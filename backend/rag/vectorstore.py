@@ -20,6 +20,23 @@ logger = logging.getLogger("singularity.rag.vectorstore")
 
 _client = None
 _client_tried = False
+_schema_ok: bool | None = None
+
+
+def _schema_unavailable(exc: Exception) -> bool:
+    """True when Supabase RAG tables/RPCs are missing on the remote project."""
+    msg = str(exc).lower()
+    return "evidence_chunks" in msg or "match_documents" in msg or "pgrst202" in msg or "pgrst205" in msg
+
+
+def _mark_schema_unavailable(exc: Exception) -> None:
+    global _schema_ok
+    if _schema_unavailable(exc):
+        _schema_ok = False
+        logger.warning(
+            "RAG schema unavailable on Supabase (apply db/migrations/002_rag.sql); "
+            "disabling vector retrieval for this process."
+        )
 
 
 def _get_client():
@@ -42,6 +59,8 @@ def _get_client():
 
 def available() -> bool:
     settings = get_settings()
+    if _schema_ok is False:
+        return False
     return bool(
         settings.rag_enabled
         and _get_client() is not None
@@ -74,6 +93,7 @@ async def upsert_chunks(chunks: list[dict[str, Any]]) -> int:
             client.table("evidence_chunks").insert(rows).execute()
             return len(rows)
         except Exception as exc:  # noqa: BLE001
+            _mark_schema_unavailable(exc)
             logger.warning("evidence_chunks insert failed: %s", exc)
             return 0
 
@@ -90,14 +110,24 @@ async def similarity_search(query: str, k: int = 5) -> list[dict[str, Any]]:
         return []
 
     def _search() -> list[dict[str, Any]]:
-        try:
-            res = client.rpc(
-                "match_documents",
-                {"query_embedding": vec, "match_count": k, "filter": {}},
-            ).execute()
-            return res.data or []
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("match_documents rpc failed: %s", exc)
-            return []
+        last_exc: Exception | None = None
+        # Remote projects may use filter_type (text) instead of filter (jsonb).
+        payloads = (
+            {"query_embedding": vec, "match_count": k, "filter_type": None},
+            {"query_embedding": vec, "match_count": k, "filter_type": ""},
+            {"query_embedding": vec, "match_count": k, "filter": {}},
+        )
+        for params in payloads:
+            try:
+                res = client.rpc("match_documents", params).execute()
+                global _schema_ok
+                _schema_ok = True
+                return res.data or []
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if last_exc:
+            _mark_schema_unavailable(last_exc)
+            logger.warning("match_documents rpc failed: %s", last_exc)
+        return []
 
     return await asyncio.to_thread(_search)

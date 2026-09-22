@@ -54,14 +54,33 @@ from state import (
     DeliberationPayload,
     ErrorPayload,
     EvidenceItem,
+    MonteCarloPayload,
     NarrativeCluster,
     PersonaBatchPayload,
+    PredictionMarketPayload,
     SingularityState,
     SocialInteractionTickPayload,
     SocialSimulationPayload,
 )
 
 logger = logging.getLogger("singularity.flow")
+
+
+def _deliberation_payload(delib: dict) -> DeliberationPayload:
+    clusters = [NarrativeCluster(**c) for c in delib.get("narrative_clusters", [])]
+    return DeliberationPayload(
+        agreement_rate=float(delib.get("agreement_rate", 0.5)),
+        polarization_index=float(delib.get("polarization_index", 0.2)),
+        confidence_score=float(delib.get("confidence_score", 0.5)),
+        narrative_clusters=clusters,
+        cluster_sentiments=delib.get("cluster_sentiments", {}),
+        cluster_actions=delib.get("cluster_actions", {}),
+        persona_archetypes=delib.get("persona_archetypes", []),
+        entropy_mean=float(delib.get("entropy_mean", 0.0)),
+        social_contagion_index=float(delib.get("social_contagion_index", 0.0)),
+        mean_sentiment=float(delib.get("mean_sentiment", 0.0)),
+        mean_action_likelihood=float(delib.get("mean_action_likelihood", 0.0)),
+    )
 
 
 class SingularityFlow:
@@ -80,6 +99,23 @@ class SingularityFlow:
 
     def _elapsed_ms(self) -> int:
         return int((time.monotonic() - self._started) * 1000)
+
+    def _budget_exceeded(self) -> bool:
+        settings = get_settings()
+        exceeded = settings.flow_budget_exceeded(self._elapsed_ms())
+        if exceeded:
+            self.state.metrics["flow_budget_exceeded"] = True
+        return exceeded
+
+    def _warn_flow_budget(self, phase: str) -> None:
+        if not self.state.metrics.get("flow_budget_exceeded"):
+            return
+        log_flow(
+            self.state,
+            "flow_budget_warning",
+            elapsed_ms=self._elapsed_ms(),
+            data={"phase": phase, "budget_seconds": get_settings().flow_budget_seconds},
+        )
 
     async def _error(self, code: str, message: str, node_id: str | None = None) -> None:
         logger.warning("flow error [%s] node=%s: %s", code, node_id, message)
@@ -155,6 +191,8 @@ class SingularityFlow:
                 "query": self.state.query,
                 "web_sources_enabled": self.state.web_sources_enabled,
                 "focus_questions": self.state.metrics.get("focus_questions", []),
+                "latency_mode": get_settings().latency_mode_normalized,
+                "flow_budget_seconds": get_settings().flow_budget_seconds,
             },
         )
         self._start_heartbeat()
@@ -233,7 +271,15 @@ class SingularityFlow:
             await self._emit("persona_batch", payload)
 
         try:
-            result = await psychometric_agent.run(self.state, emit_batch)
+            from nlp.topic_context import build_topic_context
+
+            topic_ctx = await build_topic_context(self.state.query, self.state.evidence)
+            self.state.metrics["topic_context"] = {
+                "domain_label": topic_ctx.domain_label,
+                "keyphrases": topic_ctx.keyphrases,
+                "entities": topic_ctx.entities,
+            }
+            result = await psychometric_agent.run(self.state, emit_batch, topic_context=topic_ctx)
             self.state.persona_responses = result.responses
             self.state.persona_opinions = result.opinions
             self.state.ocean_mean = result.ocean_mean
@@ -258,25 +304,7 @@ class SingularityFlow:
                 )
             if result.deliberation:
                 self.state.metrics["deliberation"] = result.deliberation
-                clusters = [
-                    NarrativeCluster(**c) for c in result.deliberation.get("narrative_clusters", [])
-                ]
-                await self._emit(
-                    "deliberation_ready",
-                    DeliberationPayload(
-                        agreement_rate=float(result.deliberation.get("agreement_rate", 0.5)),
-                        polarization_index=float(result.deliberation.get("polarization_index", 0.2)),
-                        confidence_score=float(result.deliberation.get("confidence_score", 0.5)),
-                        narrative_clusters=clusters,
-                        cluster_sentiments=result.deliberation.get("cluster_sentiments", {}),
-                        cluster_actions=result.deliberation.get("cluster_actions", {}),
-                        persona_archetypes=result.deliberation.get("persona_archetypes", []),
-                        entropy_mean=float(result.deliberation.get("entropy_mean", 0.0)),
-                        social_contagion_index=float(
-                            result.deliberation.get("social_contagion_index", 0.0)
-                        ),
-                    ),
-                )
+                await self._emit("deliberation_ready", _deliberation_payload(result.deliberation))
             await self._emit(
                 "agent_result",
                 AgentResultPayload(
@@ -288,8 +316,31 @@ class SingularityFlow:
                 ),
             )
             self._resolved.add(node.id)
+            if result.opinions:
+                asyncio.create_task(self._refresh_narrative_topics(result.opinions))
         except Exception as exc:  # noqa: BLE001
             await self._error("psychometric_failed", str(exc), node.id)
+
+    async def _refresh_narrative_topics(self, opinions: list) -> None:
+        """Background BERTopic pass over persona comments (non-blocking)."""
+        try:
+            from nlp.narrative import discover_narrative_topics, merge_narrative_clusters
+
+            comments = [o.comment for o in opinions if o.comment]
+            clusters = await discover_narrative_topics(comments)
+            if not clusters:
+                return
+            sentiments = [float(o.sentiment) for o in opinions]
+            deliberation = self.state.metrics.get("deliberation") or {}
+            existing = deliberation.get("narrative_clusters") or []
+            merged = merge_narrative_clusters(existing, clusters, sentiments)
+            deliberation["narrative_clusters"] = merged
+            self.state.metrics["deliberation"] = deliberation
+            self.state.metrics["deliberation_refresh"] = deliberation
+            await self._emit("deliberation_ready", _deliberation_payload(deliberation))
+            await self._refresh_causal_outcome()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("BERTopic narrative refresh skipped: %s", exc)
 
     async def _run_social_simulation(self) -> None:
         if not get_settings().social_simulation_enabled:
@@ -310,23 +361,7 @@ class SingularityFlow:
                 refresh = result.metrics.get("deliberation_refresh")
                 if refresh:
                     self.state.metrics["deliberation"] = refresh
-                    clusters = [
-                        NarrativeCluster(**c) for c in refresh.get("narrative_clusters", [])
-                    ]
-                    await self._emit(
-                        "deliberation_ready",
-                        DeliberationPayload(
-                            agreement_rate=float(refresh.get("agreement_rate", 0.5)),
-                            polarization_index=float(refresh.get("polarization_index", 0.2)),
-                            confidence_score=float(refresh.get("confidence_score", 0.5)),
-                            narrative_clusters=clusters,
-                            cluster_sentiments=refresh.get("cluster_sentiments", {}),
-                            cluster_actions=refresh.get("cluster_actions", {}),
-                            persona_archetypes=refresh.get("persona_archetypes", []),
-                            entropy_mean=float(refresh.get("entropy_mean", 0.0)),
-                            social_contagion_index=float(refresh.get("social_contagion_index", 0.0)),
-                        ),
-                    )
+                    await self._emit("deliberation_ready", _deliberation_payload(refresh))
             if result.final_payload:
                 await self._emit("social_simulation_ready", result.final_payload)
             self._resolved.add(node.id)
@@ -395,19 +430,22 @@ class SingularityFlow:
         """Recompute headline outcome after forecast (and other late signals) land."""
         if self.state.causal is None:
             return
-        overall = round(causal_agent.compute_outcome_probability(self.state), 1)
-        if self.state.causal.overall_prediction == overall:
+        overall, breakdown = causal_agent.compute_outcome_with_breakdown(self.state)
+        overall = round(overall, 1)
+        prev = self.state.causal
+        if prev.overall_prediction == overall and prev.outcome_breakdown == breakdown:
             return
         goal_id = "goal_root"
         nodes = []
-        for n in self.state.causal.nodes:
+        for n in prev.nodes:
             if n.id == goal_id:
                 nodes.append(n.model_copy(update={"prediction": overall}))
             else:
                 nodes.append(n)
-        self.state.causal = self.state.causal.model_copy(
-            update={"overall_prediction": overall, "nodes": nodes}
+        self.state.causal = prev.model_copy(
+            update={"overall_prediction": overall, "outcome_breakdown": breakdown, "nodes": nodes}
         )
+        session_registry.touch(self.state)
         await self._emit("causal_graph", self.state.causal)
 
     async def _run_consensus(self) -> None:
@@ -422,6 +460,7 @@ class SingularityFlow:
             metrics, payload = consensus_agent.run(self.state)
             self.state.metrics["consensus"] = metrics
             await self._emit("consensus_ready", payload)
+            await self._refresh_causal_outcome()
             self._resolved.add(node.id)
             log_algo(
                 self.state,
@@ -437,13 +476,30 @@ class SingularityFlow:
         try:
             result = prediction_market_agent.run(self.state)
             self.state.metrics["prediction_market"] = prediction_market_agent.to_metrics(result)
+            await self._emit(
+                "prediction_market_ready",
+                PredictionMarketPayload(
+                    overall_outcome=result.overall_outcome,
+                    confidence_interval=result.confidence_interval,
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
             await self._error("prediction_market_failed", str(exc))
 
     async def _run_monte_carlo(self) -> None:
         try:
             result = monte_carlo_agent.run(self.state)
-            self.state.metrics["monte_carlo"] = monte_carlo_agent.to_metrics(result)
+            metrics = monte_carlo_agent.to_metrics(result)
+            self.state.metrics["monte_carlo"] = metrics
+            percentiles = metrics.get("outcome_percentiles", {})
+            await self._emit(
+                "monte_carlo_ready",
+                MonteCarloPayload(
+                    p50=float(percentiles.get("p50", 50.0)),
+                    p5=float(percentiles.get("p5", 40.0)),
+                    p95=float(percentiles.get("p95", 60.0)),
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
             await self._error("monte_carlo_failed", str(exc))
 
@@ -451,6 +507,7 @@ class SingularityFlow:
         try:
             graph = causal_agent.build(self.state)
             self.state.causal = graph
+            session_registry.touch(self.state)
             await self._emit("causal_graph", graph)
         except Exception as exc:  # noqa: BLE001
             await self._error("causal_failed", str(exc))
@@ -492,8 +549,10 @@ class SingularityFlow:
             await self._error("forecast_failed", str(exc), node.id)
 
     async def _run_decision_engine(self) -> None:
+        self._budget_exceeded()
+        self._warn_flow_budget("decision_engine")
         try:
-            options = decision_agent.run(self.state)
+            options = await decision_agent.run_async(self.state)
             self.state.metrics["decision_engine"] = decision_agent.to_metrics(options)
         except Exception as exc:  # noqa: BLE001
             await self._error("decision_engine_failed", str(exc))
@@ -521,6 +580,8 @@ class SingularityFlow:
             logger.warning("RAG indexing skipped: %s", exc)
 
     async def _run_report(self) -> None:
+        self._budget_exceeded()
+        self._warn_flow_budget("report")
         try:
             sections = await report_agent.build(self.state)
             self.state.report_sections = sections

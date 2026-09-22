@@ -111,9 +111,16 @@ def test_archetype_llm_runs_when_cognitive_disabled(monkeypatch):
     async def emit_batch(_payload):
         pass
 
+    async def _fake_naturalize(drafts, **kwargs):
+        return [("Naturalized comment for testing.", "naturalized") for _ in drafts], {}
+
     with patch("agents.psychometric.ipip.load", return_value=None):
         with patch("agents.psychometric._simulate_archetype", simulate_mock):
-            state = SingularityState(query="test", flow_uuid="legacy")
-            asyncio.run(run(state, emit_batch))
+            with patch(
+                "agents.psychometric.naturalize_drafts_batch",
+                side_effect=_fake_naturalize,
+            ):
+                state = SingularityState(query="test", flow_uuid="legacy")
+                asyncio.run(run(state, emit_batch))
 
     assert simulate_mock.await_count == 2
